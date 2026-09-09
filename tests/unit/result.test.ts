@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   formatCheckResult,
   isOk,
+  successRate,
   summarizeCounts,
   summarizeResults,
   validateCheckResult,
@@ -233,5 +234,60 @@ describe("validateCheckResult", () => {
 
   it("rejects objects with missing fields", () => {
     expect(validateCheckResult({} as unknown as CheckResult)).toBe(false);
+  });
+});
+
+describe("successRate", () => {
+  it("returns 0 for empty input", () => {
+    expect(successRate([])).toBe(0);
+  });
+
+  it("returns 1 for all passing results", () => {
+    expect(
+      successRate([
+        { name: "format", status: "pass" },
+        { name: "lint", status: "pass" },
+      ]),
+    ).toBe(1);
+  });
+
+  it("returns 0 when nothing passes", () => {
+    expect(
+      successRate([
+        { name: "test", status: "fail" },
+        { name: "lint", status: "skip" },
+      ]),
+    ).toBe(0);
+  });
+
+  it("returns the correct ratio for mixed results", () => {
+    expect(
+      successRate([
+        { name: "format", status: "pass" },
+        { name: "test", status: "fail" },
+        { name: "lint", status: "skip" },
+        { name: "build", status: "pass" },
+      ]),
+    ).toBe(0.5);
+  });
+
+  it("includes skip results in the denominator", () => {
+    expect(
+      successRate([
+        { name: "format", status: "pass" },
+        { name: "lint", status: "skip" },
+        { name: "docs", status: "skip" },
+      ]),
+    ).toBeCloseTo(1 / 3, 10);
+  });
+
+  it("does not mutate the input", () => {
+    const results: CheckResult[] = [
+      { name: "format", status: "pass" },
+      { name: "test", status: "fail" },
+    ];
+    const snapshot = structuredClone(results);
+    successRate(results);
+    expect(results).toEqual(snapshot);
   });
 });

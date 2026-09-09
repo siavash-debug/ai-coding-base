@@ -75,6 +75,19 @@ export function summarizeCounts(
   };
 }
 
+export function successRate(results: readonly CheckResult[]): number {
+  if (results.length === 0) {
+    return 0;
+  }
+  let passed = 0;
+  for (const result of results) {
+    if (result.status === "pass") {
+      passed += 1;
+    }
+  }
+  return passed / results.length;
+}
+
 export function summarizeResults(results: readonly CheckResult[]): string {
   if (results.length === 0) {
     return "No checks recorded.";
