@@ -17,7 +17,9 @@
     "typecheck": "tsc --noEmit -p tsconfig.check.json",
     "test": "vitest run",
     "build": "tsc -p tsconfig.json",
-    "verify": "bash scripts/verify.sh"
+    "verify": "bash scripts/verify.sh",
+    "git:identity": "bash scripts/check-git-identity.sh",
+    "ai": "node ./dist/cli/run.js"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

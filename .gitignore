@@ -17,6 +17,15 @@ pnpm-debug.log*
 .env.*
 !.env.example
 
+# local AI runtime state (event logs, task records) — never committed
+.ai/runtime/
+
+# local agent tooling state — tool metadata is not project source and must never
+# be committed (see AGENTS.md section 8.1 / ADR-044). `.cline/` is deliberately NOT
+# here: `.cline/rules/workspace.md` is a committed adapter that points at AGENTS.md.
+.freebuff/
+.kilo/
+
 # editor / OS
 .vscode/*
 !.vscode/extensions.json

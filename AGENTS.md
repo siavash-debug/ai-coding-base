@@ -181,6 +181,44 @@ Be especially careful with:
 
 ## 8. Git Discipline
 
+### 8.1 Git Identity and Contributor Attribution
+
+All commits produced for this repository must use the repository owner's GitHub
+identity. Agent/tool names must never be used as Git author or committer identities.
+
+The repository owner's identity is `Siavash <siavashsafi76@gmail.com>` — the identity
+used throughout this repository's history. The remote is
+`github.com/siavash-debug/ai-coding-base`.
+
+Rules:
+
+- NEVER create a commit with an agent, tool, or bot name as author or committer
+  (for example `FreeBuff`, `freebuff`, `Codebuff`, or any bot identity). This applies
+  to normal, merge, generated, automated, and release commits, and to any tag that
+  carries Git attribution.
+- NEVER configure this repository's local Git identity to an agent or tool name.
+- Before creating ANY commit, inspect `git config user.name` and
+  `git config user.email` and confirm they are the owner's identity.
+- If the identity is missing, ambiguous, or does not belong to the repository owner:
+  STOP. Do not commit. Do not invent, guess, or fabricate an address (including a
+  GitHub noreply address) to get past the check.
+- Do not rewrite existing commits merely to change attribution unless explicitly
+  instructed.
+
+Run `bash scripts/check-git-identity.sh` (or `pnpm git:identity`) before committing.
+It refuses agent/tool/bot identities and unset identities, and it never modifies the
+Git configuration. It proves the identity is *not* an agent; it cannot prove the
+identity *is* the owner's, so that confirmation remains the agent's responsibility.
+
+Agent/tool names MAY appear in local tooling metadata (for example `.freebuff/`
+state or internal execution logs) where the tool requires it. They must NEVER appear
+as Git author/committer identity, and must NEVER intentionally become a GitHub
+contributor.
+
+See `docs/architecture/DECISIONS.md` ADR-044.
+
+### 8.2 General discipline
+
 Do not:
 - Force push without explicit authorization.
 - Rewrite history unnecessarily.
