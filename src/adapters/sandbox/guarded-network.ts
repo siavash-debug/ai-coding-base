@@ -6,6 +6,7 @@ import type { OperationRefusal } from "../../ports/operation.js";
 import type {
   HttpRequest,
   HttpResponse,
+  HttpStreamResponse,
   HttpTransport,
 } from "../../ports/http-transport.js";
 
@@ -125,19 +126,50 @@ export function createGuardedNetwork(
     return undefined;
   }
 
+  /**
+   * The provider egress check, in one place.
+   *
+   * Both entry points call it, because a second copy of an admission rule is a
+   * second chance to get it wrong — and the failure mode here is the serious one:
+   * a guarded `send` beside an unguarded `sendStream` would let streaming become
+   * the one path that reaches a host the project never allowlisted.
+   */
+  function assertProviderHostAllowed(url: string): void {
+    const host = urlHost(url);
+    const safe = safeUrl(url);
+    if (
+      host === undefined ||
+      hostAllowedBy(options.providerHosts, host) === undefined
+    ) {
+      throw new NetworkBoundaryError("TARGET_NOT_ALLOWED", safe);
+    }
+  }
+
+  /**
+   * The inner transport's streaming entry point, bound once.
+   *
+   * Captured before the object literal so the spread below can be conditional: the
+   * guard forwards streaming only when the thing it wraps actually streams, rather
+   * than advertising a capability it would then have to fake.
+   */
+  const innerSendStream = options.transport.sendStream?.bind(
+    options.transport,
+  );
+
   const providerTransport: HttpTransport = {
     id: `${options.transport.id}:guarded-provider`,
     async send(request: HttpRequest): Promise<HttpResponse> {
-      const host = urlHost(request.url);
-      const safe = safeUrl(request.url);
-      if (
-        host === undefined ||
-        hostAllowedBy(options.providerHosts, host) === undefined
-      ) {
-        throw new NetworkBoundaryError("TARGET_NOT_ALLOWED", safe);
-      }
+      assertProviderHostAllowed(request.url);
       return await options.transport.send(request);
     },
+    ...(innerSendStream === undefined
+      ? {}
+      : {
+          async sendStream(request: HttpRequest): Promise<HttpStreamResponse> {
+            assertProviderHostAllowed(request.url);
+            return await innerSendStream(request);
+          },
+        }),
   };
 
   return {

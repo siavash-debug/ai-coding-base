@@ -8,6 +8,7 @@ import type { AIUsage } from "../../src/observability/usage.js";
 import {
   type HttpRequest,
   type HttpResponse,
+  type HttpStreamResponse,
   type HttpTransport,
 } from "../../src/ports/http-transport.js";
 import {
@@ -225,4 +226,182 @@ export function providerFailure(input: {
 /** Milliseconds the clock advanced across a call, for latency assertions. */
 export function latencyOf(clock: Clock, from: Date): number {
   return durationMsFrom(toIsoString(from), toIsoString(clock.now()));
+}
+
+/*
+ * Streaming fixtures.
+ *
+ * The streaming path is tested the same way the buffered path is: by scripting the
+ * port. Nothing here needs a socket, a clock or a real credential, and every failure
+ * shape — a refused connection, a refusal status, a stream that dies half-way — is
+ * something a test can produce on purpose rather than hope for.
+ */
+
+/** One Server-Sent Events frame. A string payload is sent as-is. */
+export function sseFrame(payload: unknown): string {
+  return `data: ${typeof payload === "string" ? payload : JSON.stringify(payload)}\n\n`;
+}
+
+/** The sentinel that ends a Chat Completions stream. */
+export function doneFrame(): string {
+  return sseFrame("[DONE]");
+}
+
+export interface StreamChunkFixture {
+  readonly id?: string;
+  readonly model?: string;
+  /** Absent means the frame carries no `content` member at all. */
+  readonly content?: string;
+  /** `content: null`, as a reasoning-only delta has. */
+  readonly nullContent?: boolean;
+  readonly reasoning?: string;
+  readonly finishReason?: string;
+  readonly usage?: {
+    readonly prompt?: number;
+    readonly completion?: number;
+    readonly cached?: number;
+  };
+  /** Emit a `choices` array that is empty, as a trailing usage frame has. */
+  readonly noChoices?: boolean;
+  readonly extra?: Readonly<Record<string, unknown>>;
+}
+
+function usageBody(fixture: {
+  readonly prompt?: number;
+  readonly completion?: number;
+  readonly cached?: number;
+}): Record<string, unknown> {
+  return {
+    prompt_tokens: fixture.prompt ?? 1200,
+    completion_tokens: fixture.completion ?? 300,
+    total_tokens: (fixture.prompt ?? 1200) + (fixture.completion ?? 300),
+    prompt_tokens_details: { cached_tokens: fixture.cached ?? 0 },
+  };
+}
+
+/** One Chat Completions chunk, in the streaming shape the adapter consumes. */
+export function streamChunk(fixture: StreamChunkFixture = {}): string {
+  const base = {
+    id: fixture.id ?? "chatcmpl-fixture-1",
+    model: fixture.model ?? "fixture-model",
+    object: "chat.completion.chunk",
+  };
+  const choices = fixture.noChoices
+    ? []
+    : [
+        {
+          index: 0,
+          delta: {
+            role: "assistant",
+            ...(fixture.content === undefined && fixture.nullContent !== true
+              ? {}
+              : {
+                  content: fixture.nullContent ? null : fixture.content,
+                }),
+            ...(fixture.reasoning === undefined
+              ? {}
+              : { reasoning_content: fixture.reasoning }),
+          },
+          finish_reason: fixture.finishReason ?? null,
+        },
+      ];
+  return sseFrame({
+    ...base,
+    choices,
+    ...(fixture.usage === undefined ? {} : { usage: usageBody(fixture.usage) }),
+    ...(fixture.extra ?? {}),
+  });
+}
+
+/** A transport script entry for one streamed call. */
+export type FakeStreamStep =
+  | {
+      readonly kind: "stream";
+      readonly status?: number;
+      readonly headers?: Readonly<Record<string, string>>;
+      readonly frames: readonly string[];
+      /** Deliver this many frames, then fail mid-stream. */
+      readonly failAfter?: number;
+      readonly error?: Error;
+    }
+  | { readonly kind: "throw"; readonly error: Error };
+
+export interface FakeStreamingTransport extends HttpTransport {
+  /** Every buffered request the transport received. */
+  readonly requests: readonly HttpRequest[];
+  /** Every streamed request the transport received, tracked separately. */
+  readonly streamRequests: readonly HttpRequest[];
+  sendStream(request: HttpRequest): Promise<HttpStreamResponse>;
+}
+
+/**
+ * A transport that can stream, with both entry points scripted independently.
+ *
+ * Two scripts rather than one, deliberately: a test that asserts streaming was *not*
+ * used needs the buffered path to be scripted and the streamed path to stay empty, and
+ * vice versa. Sharing one queue would make "which entry point was called?" unassertable.
+ */
+export function createFakeStreamingTransport(input: {
+  readonly stream?: readonly FakeStreamStep[];
+  readonly buffered?: readonly TransportStep[];
+}): FakeStreamingTransport {
+  const requests: HttpRequest[] = [];
+  const streamRequests: HttpRequest[] = [];
+  let bufferedIndex = 0;
+  let streamIndex = 0;
+
+  async function* serve(
+    step: Extract<FakeStreamStep, { kind: "stream" }>,
+  ): AsyncGenerator<string> {
+    const limit = step.failAfter ?? step.frames.length;
+    for (let index = 0; index < limit; index += 1) {
+      const frame = step.frames[index];
+      if (frame !== undefined) {
+        yield frame;
+      }
+    }
+    if (step.failAfter !== undefined) {
+      throw step.error ?? new TypeError("terminated");
+    }
+  }
+
+  return {
+    id: "fake-streaming-transport",
+    requests,
+    streamRequests,
+
+    async send(request: HttpRequest): Promise<HttpResponse> {
+      requests.push(request);
+      const step = (input.buffered ?? [])[bufferedIndex];
+      bufferedIndex += 1;
+      if (step === undefined) {
+        throw new Error(
+          `fake streaming transport received buffered request #${bufferedIndex} with no scripted response`,
+        );
+      }
+      if ("error" in step) {
+        throw step.error;
+      }
+      return step;
+    },
+
+    async sendStream(request: HttpRequest): Promise<HttpStreamResponse> {
+      streamRequests.push(request);
+      const step = (input.stream ?? [])[streamIndex];
+      streamIndex += 1;
+      if (step === undefined) {
+        throw new Error(
+          `fake streaming transport received streamed request #${streamIndex} with no scripted step`,
+        );
+      }
+      if (step.kind === "throw") {
+        throw step.error;
+      }
+      return {
+        status: step.status ?? 200,
+        headers: step.headers ?? {},
+        chunks: serve(step),
+      };
+    },
+  };
 }

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { createFakeTransport, jsonResponse } from "../support/llm.js";
+import {
+  createFakeStreamingTransport,
+  createFakeTransport,
+  jsonResponse,
+} from "../support/llm.js";
 import {
   accessPolicy,
   createSandboxFixture,
@@ -206,6 +210,63 @@ describe("sandbox: network boundary", () => {
         expect(error).not.toContain("token=");
       },
     );
+  });
+
+  it("applies the same provider-host check to a streamed request", async () => {
+    const transport = createFakeStreamingTransport({
+      stream: [{ kind: "stream", frames: ['data: {"ok":true}\n\n'] }],
+    });
+    await withFixture(
+      {
+        transport,
+        policy: accessPolicy({
+          allowed: ["network.connect"],
+          networkEnabled: true,
+          providerHosts: ["api.provider.test"],
+        }),
+      },
+      async (subject) => {
+        const { providerTransport } = subject.sandbox.network;
+        const request = {
+          url: "https://api.unlisted.test/v1/chat",
+          method: "POST" as const,
+          headers: {},
+          body: "{}",
+          timeoutMs: 1_000,
+          correlationId: "test",
+        };
+
+        // Streaming must not become the one path that reaches a host the project never
+        // allowlisted. A guard on `send` beside an unguarded `sendStream` would be
+        // exactly that, so the refusal is asserted on the streaming entry point itself.
+        await expect(providerTransport.sendStream?.(request)).rejects.toThrow();
+        expect(transport.streamRequests).toHaveLength(0);
+
+        // And the allowlisted host still works, so this is a check and not a blanket.
+        const stream = await providerTransport.sendStream?.({
+          ...request,
+          url: "https://api.provider.test/v1/chat",
+        });
+        expect(stream?.status).toBe(200);
+        let text = "";
+        for await (const chunk of stream?.chunks ?? []) {
+          text += chunk;
+        }
+        expect(text).toContain("ok");
+      },
+    );
+  });
+
+  it("does not advertise streaming when the wrapped transport cannot stream", async () => {
+    const transport = createFakeTransport([jsonResponse("{}")]);
+    await withFixture({ transport }, async (subject) => {
+      // The guard forwards a capability, it does not manufacture one: a wrapper that
+      // always exposed `sendStream` would offer callers something it would then have to
+      // fake, and the provider answers "can this transport stream?" by asking it.
+      expect(
+        subject.sandbox.network.providerTransport.sendStream,
+      ).toBeUndefined();
+    });
   });
 });
 
