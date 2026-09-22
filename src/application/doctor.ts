@@ -1351,7 +1351,9 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
     detail:
       runtime.modelRates.length === 0
         ? "no model rates configured; calls will be reported as unpriced, never as $0"
-        : `${runtime.modelRates.length} rate(s) configured for provider "${runtime.providerId}"`,
+        : `${runtime.modelRates.length} rate(s) configured across ` +
+          `${new Set(runtime.modelRates.map((rate) => rate.providerId)).size} provider(s)`,
+
   });
 
   return summarize(deps.projectRoot, checks);
