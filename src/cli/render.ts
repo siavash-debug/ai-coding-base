@@ -1154,7 +1154,11 @@ export function formatFrontierModels(input: {
       `  ${provider.id}  ${provider.kind}  ${provider.baseUrl}  ` +
         `credential ${provider.credentialEnvVar}  ` +
         `${models.length} model(s)  ` +
-        `${reachable.has(provider.id) ? "adapter built" : "not constructed"}`,
+        `${reachable.has(provider.id) ? "adapter built" : "not constructed"}  ` +
+        // Whether calls to this endpoint are made incrementally is what an operator
+        // needs when a provider is slow: the same vendor can be fine one way and
+        // unusable the other.
+        `${provider.streaming === true ? "streaming" : "buffered"}`,
     );
   }
   return lines.join("\n");

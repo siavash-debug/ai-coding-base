@@ -6,9 +6,12 @@ import type { AIUsage } from "../../observability/usage.js";
 import { assertValidUsage } from "../../observability/usage.js";
 import type { Environment } from "../../ports/environment.js";
 import {
+  type HttpStreamResponse,
   type HttpTransport,
+  type StreamingHttpTransport,
   HttpTransportError,
   isHttpTransportError,
+  supportsStreaming,
 } from "../../ports/http-transport.js";
 import {
   type LlmContentPresence,
@@ -49,10 +52,28 @@ import {
  *   (ADR-035);
  * - **persist or log content** — no prompt, response, header or credential value
  *   is ever included in an error message. Operator-facing messages are redacted.
+ *
+ * ## Streaming
+ *
+ * The adapter can consume a Server-Sent Events stream instead of a buffered body,
+ * and it stays one adapter: streaming is a transport choice, not a second
+ * implementation, and it changes nothing above this port. `complete` still resolves a
+ * single `LlmResponse` — assembled from the deltas, with the provider's usage and
+ * finish reason carried through unchanged — so no decision contract, accounting rule
+ * or provenance guarantee depends on which mode ran.
+ *
+ * Why it exists: a buffered call cannot distinguish a slow generator from a dead one,
+ * so an endpoint that queues for a minute looks exactly like an outage until the
+ * deadline expires. A stream reports status and headers as soon as the peer answers
+ * and delivers text as it is produced, which is the difference between a deadline that
+ * merely bounds a hang and one that is rarely reached.
  */
 
 export const OPENAI_COMPATIBLE_PROVIDER_ID = "openai-compatible";
 export const DEFAULT_LLM_TIMEOUT_MS = 60_000;
+
+/** The SSE sentinel that ends a Chat Completions stream. */
+export const STREAM_DONE_SENTINEL = "[DONE]";
 
 export interface OpenAiCompatibleProviderOptions {
   /** API root, e.g. `https://api.openai.com/v1`. A trailing slash is tolerated. */
@@ -68,6 +89,19 @@ export interface OpenAiCompatibleProviderOptions {
   readonly id?: string;
   /** Extra model ids this adapter is allowed to be asked for. */
   readonly additionalModels?: readonly string[];
+  /**
+   * Ask for a Server-Sent Events response and assemble the answer from its deltas.
+   *
+   * A provider property, not a model one: whether an endpoint answers incrementally
+   * is a fact about the endpoint. Off by default, so an existing configuration keeps
+   * the buffered behaviour it was validated with.
+   *
+   * Streaming is *opportunistic*: when this is set but the transport that reaches
+   * this provider cannot stream, the adapter falls back to the buffered path rather
+   * than failing. That is a capability downgrade, never a safety one — the timeout,
+   * the egress guard and the failure taxonomy are identical in both modes.
+   */
+  readonly streaming?: boolean;
 }
 
 /** HTTP status to failure category. Exported so the mapping is directly testable. */
@@ -193,6 +227,168 @@ function classifyContentPresence(payload: {
   return "reasoning-only";
 }
 
+/**
+ * Splits an SSE body into `data:` payloads.
+ *
+ * A deliberate simplification, stated so it can be checked: for Chat Completions,
+ * each `data:` line is a complete JSON event, so the multi-line `data:` continuation
+ * the SSE specification permits is not implemented. Comment lines (`:`), `event:`
+ * and `id:` fields carry nothing this protocol puts to use and are skipped by not
+ * matching, which is also what makes keep-alive traffic harmless.
+ *
+ * Exported and pure so the framing can be tested without a socket.
+ */
+export async function* iterateSseData(
+  chunks: AsyncIterable<string>,
+): AsyncGenerator<string> {
+  let buffer = "";
+  for await (const chunk of chunks) {
+    buffer += chunk;
+    let index = buffer.indexOf("\n");
+    while (index >= 0) {
+      const payload = sseDataField(buffer.slice(0, index));
+      buffer = buffer.slice(index + 1);
+      if (payload !== undefined) {
+        yield payload;
+      }
+      index = buffer.indexOf("\n");
+    }
+  }
+  // A final frame that arrived without a trailing newline is still a frame: the
+  // peer stopped writing, so whatever is buffered is the last of it.
+  const payload = sseDataField(buffer);
+  if (payload !== undefined) {
+    yield payload;
+  }
+}
+
+/** The payload of a `data:` line, or `undefined` for any other line. */
+function sseDataField(line: string): string | undefined {
+  const trimmed = line.endsWith("\r") ? line.slice(0, -1) : line;
+  if (!trimmed.startsWith("data:")) {
+    return undefined;
+  }
+  const payload = trimmed.slice("data:".length).trim();
+  return payload.length === 0 ? undefined : payload;
+}
+
+/**
+ * Everything a stream has reported so far.
+ *
+ * The booleans exist so a stream that produced nothing can be described in the same
+ * structural vocabulary a buffered response uses, and so no text has to be inspected
+ * to do it.
+ */
+interface StreamAccumulator {
+  content: string;
+  finishReason?: unknown;
+  usage?: unknown;
+  requestId?: string;
+  reportedModel?: string;
+  /** At least one `data:` payload arrived. */
+  sawData: boolean;
+  /** At least one payload parsed as JSON. */
+  sawEvent: boolean;
+  /** At least one event carried a non-empty `choices` array. */
+  sawChoice: boolean;
+  /** A choice carried a `content` field, whether or not it held anything. */
+  sawContentField: boolean;
+}
+
+/**
+ * What a finished stream carried, in the buffered classifier's own vocabulary.
+ *
+ * Reported only when there is no usable content, so this is the shape of a failed
+ * answer rather than of a successful one.
+ */
+function streamContentPresence(acc: StreamAccumulator): LlmContentPresence {
+  if (!acc.sawData) {
+    // Nothing was answered with at all. "No choices" is the honest description: the
+    // stream carried no event that could have held one.
+    return "no-choices";
+  }
+  if (!acc.sawEvent) {
+    return "unparseable";
+  }
+  if (!acc.sawChoice) {
+    return "no-choices";
+  }
+  if (acc.sawContentField) {
+    return "empty-content";
+  }
+  return "reasoning-only";
+}
+
+/** Folds one SSE payload into the accumulator. Never throws on bad input. */
+function accumulateStreamEvent(acc: StreamAccumulator, payload: string): void {
+  acc.sawData = true;
+  let event: unknown;
+  try {
+    event = JSON.parse(payload);
+  } catch {
+    // One unreadable frame does not discard the frames around it; if none of them
+    // parse, `streamContentPresence` reports it as unparseable.
+    return;
+  }
+  acc.sawEvent = true;
+  if (typeof event !== "object" || event === null) {
+    return;
+  }
+  const record = event as Record<string, unknown>;
+  // Identity is established by the first frame that carries it and never overwritten:
+  // the id names *this* completion, so the frame that opened the answer is the
+  // authority on which one it is. Usage is the opposite case — the trailing frame is
+  // the authoritative one — which is why the two are not handled alike.
+  if (
+    acc.requestId === undefined &&
+    typeof record["id"] === "string" &&
+    record["id"].length > 0
+  ) {
+    acc.requestId = record["id"];
+  }
+  if (
+    acc.reportedModel === undefined &&
+    typeof record["model"] === "string" &&
+    record["model"].length > 0
+  ) {
+    acc.reportedModel = record["model"];
+  }
+  // Some endpoints attach usage to the final content frame and some send it in a
+  // trailing frame of its own. Taking the last one reported covers both without
+  // asking for a vendor-specific `stream_options` parameter.
+  if (record["usage"] !== undefined) {
+    acc.usage = record["usage"];
+  }
+  const choices = record["choices"];
+  if (!Array.isArray(choices) || choices.length === 0) {
+    return;
+  }
+  acc.sawChoice = true;
+  const choice = choices[0];
+  if (typeof choice !== "object" || choice === null) {
+    return;
+  }
+  const row = choice as Record<string, unknown>;
+  if (row["finish_reason"] !== undefined && row["finish_reason"] !== null) {
+    acc.finishReason = row["finish_reason"];
+  }
+  // `delta` is the streaming shape; `message` is accepted because a few compatible
+  // endpoints send a whole message per frame, and the cost of tolerating it is
+  // three tokens of branching versus a silently empty answer.
+  const carrier = row["delta"] ?? row["message"];
+  if (typeof carrier !== "object" || carrier === null) {
+    return;
+  }
+  const delta = carrier as Record<string, unknown>;
+  const piece = extractContent(delta["content"]);
+  if (piece !== undefined) {
+    acc.content += piece;
+  }
+  if (typeof delta["content"] === "string" || Array.isArray(delta["content"])) {
+    acc.sawContentField = true;
+  }
+}
+
 export function createOpenAiCompatibleProvider(
   options: OpenAiCompatibleProviderOptions,
 ): LlmProvider {
@@ -276,6 +472,170 @@ export function createOpenAiCompatibleProvider(
     }
   }
 
+  /**
+   * The streaming entry point, when configuration asks for it *and* the transport
+   * that reaches this provider can deliver it.
+   *
+   * Resolved once, at construction: a capability that cannot change at runtime is
+   * not something to re-ask on every call.
+   */
+  const streamingTransport =
+    options.streaming === true && supportsStreaming(options.transport)
+      ? options.transport
+      : undefined;
+
+  /** One translation for every transport-level failure, from either mode. */
+  function transportFailure(error: unknown, modelId: string): never {
+    if (isHttpTransportError(error)) {
+      // Timeouts and socket failures are categorised by the transport; this adapter
+      // only attributes them to the provider and the model.
+      fail(error.failureKind, modelId);
+    }
+    if (error instanceof LlmProviderError) {
+      throw error;
+    }
+    if (hasDomainErrorCode(error, "FORBIDDEN")) {
+      // Policy refused this call before it reached the socket (egress, capability or
+      // approval gate). A refusal is not an unknown transport failure, and it is never
+      // retryable: repeating it asks the same boundary the same question.
+      fail("refused", modelId);
+    }
+    // An unrecognised transport error is not assumed to be retryable.
+    fail("unknown", modelId);
+  }
+
+  /**
+   * The request body. One builder, so the two modes cannot drift apart in what they
+   * ask for; `stream` is the only difference.
+   *
+   * No `stream_options` is sent, deliberately: on the endpoints measured, usage
+   * already arrives in the stream, and requesting an optional parameter an endpoint
+   * does not implement converts a working call into a rejection for no gain.
+   */
+  function buildRequestBody(
+    modelId: string,
+    request: LlmRequest,
+    stream: boolean,
+  ): Record<string, unknown> {
+    const body: Record<string, unknown> = {
+      model: modelId,
+      messages: request.messages.map((message) => ({
+        role: message.role,
+        content: message.content,
+      })),
+    };
+    if (request.maxOutputTokens !== undefined) {
+      body["max_tokens"] = request.maxOutputTokens;
+    }
+    if (request.temperature !== undefined) {
+      body["temperature"] = request.temperature;
+    }
+    if (request.stopSequences !== undefined) {
+      body["stop"] = [...request.stopSequences];
+    }
+    if (stream) {
+      body["stream"] = true;
+    }
+    return body;
+  }
+
+  /**
+   * The streamed path, resolved into the same `LlmResponse` the buffered path
+   * returns.
+   *
+   * The ordering of the checks matches the buffered path exactly — transport
+   * failure, then status, then shape, then content — because the taxonomy a caller
+   * branches on must not depend on how the bytes arrived.
+   */
+  async function completeStreamed(input: {
+    readonly request: LlmRequest;
+    readonly modelId: string;
+    readonly credential: string;
+    readonly transport: StreamingHttpTransport;
+  }): Promise<LlmResponse> {
+    const { request, modelId, credential, transport } = input;
+    const startedAt = toIsoString(options.clock.now());
+
+    let stream: HttpStreamResponse;
+    try {
+      stream = await transport.sendStream({
+        url: `${baseUrl}/chat/completions`,
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "text/event-stream",
+          authorization: `Bearer ${credential}`,
+        },
+        body: JSON.stringify(buildRequestBody(modelId, request, true)),
+        timeoutMs,
+        correlationId: request.correlationId,
+      });
+    } catch (error) {
+      transportFailure(error, modelId);
+    }
+
+    if (stream.status < 200 || stream.status >= 300) {
+      const retryAfterMs = parseRetryAfterMs(
+        stream.headers,
+        options.clock.now().getTime(),
+      );
+      fail(classifyProviderStatus(stream.status), modelId, {
+        statusCode: stream.status,
+        ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+      });
+    }
+
+    const accumulated: StreamAccumulator = {
+      content: "",
+      sawData: false,
+      sawEvent: false,
+      sawChoice: false,
+      sawContentField: false,
+    };
+    try {
+      for await (const payload of iterateSseData(stream.chunks)) {
+        if (payload === STREAM_DONE_SENTINEL) {
+          break;
+        }
+        accumulateStreamEvent(accumulated, payload);
+      }
+    } catch (error) {
+      // A stream that dies after the headers reports the same categories as one that
+      // never connected, so the retry policy sees a single taxonomy.
+      transportFailure(error, modelId);
+    }
+
+    const latencyMs = durationMsFrom(
+      startedAt,
+      toIsoString(options.clock.now()),
+    );
+    // A partial answer is never returned. Handing back what arrived before the stream
+    // broke would be indistinguishable downstream from an answer the model finished,
+    // and a truncated completion is worse than a reported failure.
+    const content =
+      accumulated.content.length === 0 ? undefined : accumulated.content;
+    if (content === undefined) {
+      fail("malformed-response", modelId, {
+        statusCode: stream.status,
+        contentPresence: streamContentPresence(accumulated),
+      });
+    }
+
+    const usage = normalizeUsage(accumulated.usage, modelId);
+    return {
+      providerId,
+      modelId: accumulated.reportedModel ?? modelId,
+      content,
+      finishReason: classifyFinishReason(accumulated.finishReason),
+      ...(usage === undefined ? {} : { usage }),
+      latencyMs,
+      attempts: 1,
+      ...(accumulated.requestId === undefined
+        ? {}
+        : { requestId: accumulated.requestId }),
+    };
+  }
+
   return {
     id: providerId,
     models: [defaultModel, ...(options.additionalModels ?? [])],
@@ -307,23 +667,16 @@ export function createOpenAiCompatibleProvider(
         );
       }
 
-      const body: Record<string, unknown> = {
-        model: modelId,
-        messages: request.messages.map((message) => ({
-          role: message.role,
-          content: message.content,
-        })),
-      };
-      if (request.maxOutputTokens !== undefined) {
-        body["max_tokens"] = request.maxOutputTokens;
-      }
-      if (request.temperature !== undefined) {
-        body["temperature"] = request.temperature;
-      }
-      if (request.stopSequences !== undefined) {
-        body["stop"] = [...request.stopSequences];
+      if (streamingTransport !== undefined) {
+        return await completeStreamed({
+          request,
+          modelId,
+          credential,
+          transport: streamingTransport,
+        });
       }
 
+      const body = buildRequestBody(modelId, request, false);
       const startedAt = toIsoString(options.clock.now());
       let response;
       try {
@@ -340,22 +693,7 @@ export function createOpenAiCompatibleProvider(
           correlationId: request.correlationId,
         });
       } catch (error) {
-        if (isHttpTransportError(error)) {
-          // Timeouts and socket failures are categorised by the transport; this
-          // adapter only attributes them to the provider and the model.
-          fail(error.failureKind, modelId);
-        }
-        if (error instanceof LlmProviderError) {
-          throw error;
-        }
-        if (hasDomainErrorCode(error, "FORBIDDEN")) {
-          // Policy refused this call before it reached the socket (egress, capability
-          // or approval gate). A refusal is not an unknown transport failure, and it
-          // is never retryable: repeating it asks the same boundary the same question.
-          fail("refused", modelId);
-        }
-        // An unrecognised transport error is not assumed to be retryable.
-        fail("unknown", modelId);
+        transportFailure(error, modelId);
       }
 
       const latencyMs = durationMsFrom(

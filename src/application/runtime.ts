@@ -378,6 +378,9 @@ function buildFrontierProviders(
       ...(provider.timeoutMs === undefined
         ? {}
         : { timeoutMs: provider.timeoutMs }),
+      ...(provider.streaming === undefined
+        ? {}
+        : { streaming: provider.streaming }),
     });
     providers.set(
       provider.id,

@@ -431,6 +431,17 @@ export interface FrontierProviderConfig {
   readonly credentialEnvVar: string;
   readonly timeoutMs?: number;
   readonly maxAttempts?: number;
+  /**
+   * Ask this provider for a Server-Sent Events response and assemble the answer from
+   * its deltas.
+   *
+   * A fact about the *endpoint*, not about a model: whether it answers incrementally is
+   * a property of the service, so it is configured where the service is. Defaults to
+   * `false`, which keeps the buffered behaviour every existing project was validated
+   * with, and makes enabling it an explicit operator decision rather than a silent
+   * change in how calls are made.
+   */
+  readonly streaming?: boolean;
 }
 
 export interface FrontierRoutingConfig {
@@ -478,6 +489,7 @@ export const DEFAULT_FRONTIER_CONFIG: FrontierConfig = {
       kind: "openai-compatible",
       baseUrl: "https://openrouter.ai/api/v1",
       credentialEnvVar: "OPENROUTER_API_KEY",
+      streaming: false,
     },
   ],
   models: DEFAULT_FRONTIER_MODELS,
@@ -522,6 +534,11 @@ function assertFrontierProvider(
     `${field}.maxAttempts`,
     MAX_LLM_ATTEMPTS,
   );
+  const streaming = booleanOrDefault(
+    candidate["streaming"],
+    false,
+    `${field}.streaming`,
+  );
   return {
     id,
     kind,
@@ -529,6 +546,7 @@ function assertFrontierProvider(
     credentialEnvVar,
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
     ...(maxAttempts === undefined ? {} : { maxAttempts }),
+    streaming,
   };
 }
 
