@@ -37,7 +37,18 @@ export interface FrontierStepRequest {
 export interface FrontierStepResult {
   readonly stepId: string;
   readonly providerId: string;
+  /**
+   * The model that was **requested**, by the id the registry and configuration know.
+   *
+   * Deliberately not the name the provider reports back. A gateway may normalise an id
+   * in its response, and downstream identity-keyed work — cost rates, event records,
+   * traces — must key on what this platform asked for, or a normalised reply would make
+   * a priced model look unpriced and a trace unsearchable. Use `reportedModelId` for the
+   * provider's own name.
+   */
   readonly modelId: string;
+  /** The provider's own name for the model, when it differs from what was requested. */
+  readonly reportedModelId?: string;
   readonly content: string;
   readonly finishReason: LlmFinishReason;
   /**

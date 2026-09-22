@@ -15,6 +15,7 @@ import {
   type LlmProvider,
   isLlmProviderError,
 } from "../../src/ports/llm-provider.js";
+import { createFixedEnvironment } from "../../src/ports/environment.js";
 import { createModelRegistry } from "../../src/models/registry.js";
 import type { ModelProfile } from "../../src/models/model.js";
 import {
@@ -188,6 +189,72 @@ describe("resolution", () => {
       TEXT_MODEL.modelId,
       VISION_MODEL.modelId,
     ]);
+  });
+
+  it("keys the step on the requested model, not the name the provider reports", async () => {
+    const transport = createFakeTransport([
+      jsonResponse(
+        chatCompletionBody({ model: "vendor/normalised-name", content: "done" }),
+      ),
+    ]);
+    const provider = createOpenAiCompatibleProvider({
+      id: TEXT_MODEL.providerId,
+      baseUrl: `https://${FIXTURE_HOST}/v1`,
+      modelId: TEXT_MODEL.modelId,
+      credentialEnvVar: "FIXTURE_API_KEY",
+      environment: createFixedEnvironment({ FIXTURE_API_KEY: "sk-fixture" }),
+      transport,
+      clock: CLOCK,
+    });
+    const frontier = frontierOver(
+      [TEXT_MODEL],
+      new Map([[TEXT_MODEL.providerId, provider]]),
+    );
+
+    const result = await frontier.executeStep({
+      stepId: "s1",
+      providerId: TEXT_MODEL.providerId,
+      modelId: TEXT_MODEL.modelId,
+      instruction: "Fix the parser bug",
+      correlationId: "c",
+    });
+
+    // A gateway is free to normalise an id on the way back. Everything keyed on identity
+    // — the rate table above all — has to key on what was requested, or a priced model is
+    // reported as unpriced for ever and the trace stops matching the configuration.
+    expect(result.modelId).toBe(TEXT_MODEL.modelId);
+    expect(result.reportedModelId).toBe("vendor/normalised-name");
+    expect(transport.requests[0]?.body).toContain(TEXT_MODEL.modelId);
+  });
+
+  it("omits the reported name when the provider echoes the request", async () => {
+    const transport = createFakeTransport([
+      jsonResponse(chatCompletionBody({ model: TEXT_MODEL.modelId })),
+    ]);
+    const provider = createOpenAiCompatibleProvider({
+      id: TEXT_MODEL.providerId,
+      baseUrl: `https://${FIXTURE_HOST}/v1`,
+      modelId: TEXT_MODEL.modelId,
+      credentialEnvVar: "FIXTURE_API_KEY",
+      environment: createFixedEnvironment({ FIXTURE_API_KEY: "sk-fixture" }),
+      transport,
+      clock: CLOCK,
+    });
+    const frontier = frontierOver(
+      [TEXT_MODEL],
+      new Map([[TEXT_MODEL.providerId, provider]]),
+    );
+
+    const result = await frontier.executeStep({
+      stepId: "s1",
+      providerId: TEXT_MODEL.providerId,
+      modelId: TEXT_MODEL.modelId,
+      instruction: "Fix the parser bug",
+      correlationId: "c",
+    });
+    // Absent rather than duplicated: a second field repeating the same name would be
+    // noise in every event for every provider that behaves.
+    expect(result.reportedModelId).toBeUndefined();
   });
 
   it("reports usage the provider did not give as unavailable, not as zero", async () => {

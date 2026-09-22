@@ -142,7 +142,17 @@ export function createLlmFrontier(
       return {
         stepId: request.stepId,
         providerId: response.providerId,
-        modelId: response.modelId,
+        // The identity is the model that was *requested*, never the name the provider
+        // chose to report. A gateway is free to normalise an id on the way back —
+        // `qwen3.8-flash:free` arrives as `qwen3.8-flash` on the measured endpoint —
+        // and adopting that name silently repoints everything keyed on identity: the
+        // rate lookup above all, which would then never match and would report a priced
+        // call as unpriced for ever. The provider's own name is kept beside it as
+        // provenance, so nothing is lost and nothing is confused.
+        modelId: request.modelId,
+        ...(response.modelId === request.modelId
+          ? {}
+          : { reportedModelId: response.modelId }),
         content: response.content,
         finishReason: response.finishReason,
         ...(response.usage === undefined ? {} : { usage: response.usage }),
