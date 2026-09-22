@@ -17,6 +17,7 @@ import type { ModelProfile } from "../../src/models/model.js";
 import type { Budget } from "../../src/observability/budget.js";
 import type { Environment } from "../../src/ports/environment.js";
 import {
+  ANY_PROVIDER,
   FIXTURE_USAGE,
   TEXT_MODEL,
   VISION_MODEL,
@@ -609,6 +610,96 @@ describe("retry", () => {
     expect(
       recorded[0]?.type === "DecisionCompleted" && recorded[0].payload,
     ).toMatchObject({ answeredBy: "deterministic", selectedOptionId: "stop" });
+  });
+
+  it("switches to the next ranked candidate when the first fails and the retry permits it", async () => {
+    const test = await scenario({
+      title: "Fix the parser bug",
+      models: [TEXT_MODEL, ANY_PROVIDER],
+      steps: [
+        {
+          error: new LlmProviderError(
+            {
+              failureKind: "rate-limit",
+              providerId: TEXT_MODEL.providerId,
+              modelId: TEXT_MODEL.modelId,
+              attempts: 1,
+              retryable: true,
+              statusCode: 429,
+            },
+            "scripted rate limit",
+          ),
+        },
+        { content: "the second candidate answered", usage: FIXTURE_USAGE },
+      ],
+      overrides: {
+        retry: {
+          outcome: "selected",
+          optionId: "retry",
+          reasonCode: "transient-failure",
+        },
+        completion: {
+          outcome: "selected",
+          optionId: "complete",
+          reasonCode: "verification-passed",
+        },
+      },
+    });
+
+    const result = await run(test.runtime, test.taskId);
+
+    // A retry is a *switch* inside the candidate set the plan already fixed: the model
+    // that hit the rate limit is not asked the same question a second time. This is the
+    // behaviour a rate-limited provider depends on, and it is only reachable because the
+    // plan hands the retry loop an ordered list rather than a single model.
+    expect(test.frontier.requests).toHaveLength(2);
+    expect(test.frontier.requests[0]?.modelId).toBe(TEXT_MODEL.modelId);
+    expect(test.frontier.requests[1]?.modelId).toBe(ANY_PROVIDER.modelId);
+    expect(test.frontier.requests[1]?.providerId).toBe(ANY_PROVIDER.providerId);
+    expect(result.steps[0]?.status).toBe("completed");
+    expect(result.steps[0]?.modelId).toBe(ANY_PROVIDER.modelId);
+    expect(result.steps[0]?.retry).toBe(1);
+    expect(result.retriesSpent).toBe(1);
+  });
+
+  it("does not switch candidates when the decision layer says stop", async () => {
+    const test = await scenario({
+      title: "Fix the parser bug",
+      models: [TEXT_MODEL, ANY_PROVIDER],
+      steps: [
+        {
+          error: new LlmProviderError(
+            {
+              failureKind: "rate-limit",
+              providerId: TEXT_MODEL.providerId,
+              modelId: TEXT_MODEL.modelId,
+              attempts: 1,
+              retryable: true,
+              statusCode: 429,
+            },
+            "scripted rate limit",
+          ),
+        },
+        { content: "must never be reached", usage: FIXTURE_USAGE },
+      ],
+      overrides: {
+        retry: {
+          outcome: "selected",
+          optionId: "stop",
+          reasonCode: "not-justified",
+        },
+      },
+    });
+
+    const result = await run(test.runtime, test.taskId);
+
+    // A second eligible candidate existed and the cap permitted another attempt, so
+    // nothing but the decision layer's own answer stopped this. Fail-closed means the
+    // permissiveness of the configuration is never itself a licence to continue.
+    expect(test.frontier.calls).toBe(1);
+    expect(result.retriesSpent).toBe(0);
+    expect(result.steps[0]?.status).toBe("failed");
+    expect(result.stopReason).toBe("step-failed");
   });
 
   it("treats a policy refusal as a refusal, and escalates to a human", async () => {
