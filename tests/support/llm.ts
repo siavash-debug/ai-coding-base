@@ -70,6 +70,16 @@ export function jsonResponse(
 
 export interface ChatCompletionFixture {
   readonly content?: string;
+  /**
+   * Emit `content: null`, as a reasoning-only response does.
+   *
+   * A separately named switch rather than `content: undefined` so a test that means
+   * "the model produced no answer text" cannot be confused with one that simply did
+   * not pass a value to the default.
+   */
+  readonly nullContent?: boolean;
+  /** A vendor's reasoning member, sent alongside or instead of answer text. */
+  readonly reasoning?: string;
   readonly model?: string;
   readonly requestId?: string;
   readonly finishReason?: string;
@@ -117,7 +127,13 @@ export function chatCompletionBody(
     choices: [
       {
         index: 0,
-        message: { role: "assistant", content: fixture.content ?? "ok" },
+        message: {
+          role: "assistant",
+          content: fixture.nullContent ? null : (fixture.content ?? "ok"),
+          ...(fixture.reasoning === undefined
+            ? {}
+            : { reasoning: fixture.reasoning }),
+        },
         finish_reason: fixture.finishReason ?? "stop",
       },
     ],

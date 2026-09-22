@@ -115,6 +115,14 @@ export function createDecisionService(
         kind: decision.kind,
         question: decision.question,
         optionCount: decision.options.length,
+        // Recorded since Phase G. The id makes request/answer pairing exact rather
+        // than by kind-and-order, and the candidate ids make "what was on the
+        // table?" reconstructable from the log alone.
+        decisionId: decision.id,
+        optionIds: decision.options.map((option) => option.id),
+        ...(input.reasonCodes === undefined
+          ? {}
+          : { reasonCodes: [...input.reasonCodes] }),
       },
     });
     return decision;
@@ -147,6 +155,40 @@ export function createDecisionService(
         ...(resolved.latencyMs === undefined
           ? {}
           : { latencyMs: resolved.latencyMs }),
+        // Phase G fields. This is the *only* place a `DecisionCompleted` is written:
+        // the coordinator records the extra failure and fallback events, and asks here
+        // for the answer, so a decision never produces two completion events.
+        ...(resolved.answeredBy === undefined
+          ? {}
+          : { answeredBy: resolved.answeredBy }),
+        ...(resolved.providerId === undefined
+          ? {}
+          : { providerId: resolved.providerId }),
+        ...(resolved.modelId === undefined
+          ? {}
+          : { modelId: resolved.modelId }),
+        ...(resolved.reasonCode === undefined
+          ? {}
+          : { reasonCode: resolved.reasonCode }),
+        ...(resolved.confidence === undefined
+          ? {}
+          : { confidence: resolved.confidence }),
+        ...(resolved.ranking === undefined
+          ? {}
+          : { ranking: resolved.ranking }),
+        ...(resolved.fallback === undefined
+          ? {}
+          : { fallbackReason: resolved.fallback.reason }),
+        ...(resolved.usage === undefined ? {} : { usage: resolved.usage }),
+        ...(resolved.usageReported === undefined
+          ? {}
+          : { usageReported: resolved.usageReported }),
+        ...(resolved.costMicros === undefined
+          ? {}
+          : { costMicros: resolved.costMicros }),
+        ...(resolved.executionSource === undefined
+          ? {}
+          : { executionSource: resolved.executionSource }),
       },
     });
     return resolved;

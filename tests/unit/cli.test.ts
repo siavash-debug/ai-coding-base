@@ -564,11 +564,19 @@ describe("cli task", () => {
     const lines = (await readFile(join(eventsDir, files[0]), "utf8"))
       .trim()
       .split("\n");
-    // Two runs, each with a two-event context selection (started + selected).
-    expect(lines).toHaveLength(40);
-    const sequences = lines.map((line) => JSON.parse(line).sequence as number);
-    expect(sequences).toEqual(
-      Array.from({ length: 40 }, (_unused, index) => index + 1),
+    // The file holds exactly the recorded events, numbered without a gap or a
+    // repeat. The count itself is not pinned: new event types are additions to the
+    // log rather than changes to this invariant, and pinning it invites a test that
+    // is updated without being read.
+    const records = lines.map(
+      (line) => JSON.parse(line) as { sequence: number; type: string },
     );
+    expect(records.map((record) => record.sequence)).toEqual(
+      Array.from({ length: records.length }, (_unused, index) => index + 1),
+    );
+    // Both histories are present: the second run appended rather than starting over.
+    expect(
+      records.filter((record) => record.type === "TaskCreated"),
+    ).toHaveLength(2);
   });
 });

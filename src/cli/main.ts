@@ -1,8 +1,11 @@
 import { isDomainError } from "../core/errors.js";
 import { UsageError } from "./args.js";
 import { runApprovalsCommand } from "./commands/approvals.js";
+import { runDecisionCommand } from "./commands/decision.js";
 import { runDoctorCommand } from "./commands/doctor.js";
 import { runInit } from "./commands/init.js";
+import { runModelsCommand } from "./commands/models.js";
+import { runPolicyCommand } from "./commands/policy.js";
 import { runTaskCommand } from "./commands/task.js";
 import { formatHelp } from "./help.js";
 import {
@@ -51,6 +54,15 @@ export async function main(
     }
     if (group === "approvals") {
       return await runApprovalsCommand(tail, io, env);
+    }
+    if (group === "models") {
+      return await runModelsCommand(tail, io, env);
+    }
+    if (group === "policy") {
+      return await runPolicyCommand(tail, io, env);
+    }
+    if (group === "decision" || group === "decisions") {
+      return await runDecisionCommand(tail, io, env);
     }
     if (group.startsWith("-")) {
       // An unknown global flag is a usage error, not an unknown command.

@@ -2,6 +2,7 @@ import { durationMsFrom } from "../core/clock.js";
 import type { TaskId } from "../core/ids.js";
 import { assertNonNegativeInteger } from "../core/validation.js";
 import type { DecidedBy, DecisionOutcome } from "../decisions/decision.js";
+import type { DecisionAnswerSource } from "../decisions/domains.js";
 import { type Cost, addCost, formatCost, zeroCost } from "./cost.js";
 import { type AIUsage, addUsage, emptyUsage, totalTokens } from "./usage.js";
 
@@ -33,6 +34,23 @@ export interface LlmCallRecord {
 export interface DecisionRecordSummary {
   readonly decidedBy: DecidedBy;
   readonly outcome: DecisionOutcome;
+  /** The bounded question that was answered, when the record knows it. */
+  readonly kind?: string;
+  readonly answeredBy?: DecisionAnswerSource;
+  readonly fallbackReason?: string;
+  /**
+   * Tokens a decision provider reported for this decision.
+   *
+   * Absent when no usage was reported — which is the normal case for a decision
+   * answered by code. Decision usage is reported separately from model-turn usage
+   * rather than folded into it, so "what did the reasoning cost?" and "what did the
+   * deciding cost?" stay different questions.
+   */
+  readonly usage?: AIUsage;
+  readonly usageReported?: boolean;
+  /** Absent when the decision has no known rate. Never a fabricated zero. */
+  readonly cost?: Cost;
+  readonly latencyMs?: number;
 }
 
 /**
@@ -67,6 +85,8 @@ export interface TaskMetricsInput {
   readonly toolCalls: number;
   readonly iterations: number;
   readonly decisions: readonly DecisionRecordSummary[];
+  /** Decision consultations that failed, whether or not a fallback answered. */
+  readonly decisionFailures?: number;
   readonly contextSelections?: readonly ContextSelectionRecord[];
   readonly startedAt: string;
   readonly endedAt?: string;
@@ -129,6 +149,25 @@ export interface TaskMetrics {
   readonly escalations: number;
   readonly decisions: number;
   readonly decisionsByProvider: number;
+  /** Answers that came from the deterministic gate rather than from a provider. */
+  readonly decisionsDeterministic: number;
+  /** Answers that came from the deterministic fallback. */
+  readonly decisionFallbacks: number;
+  /** Consultations that failed. Kept apart from fallbacks on purpose. */
+  readonly decisionFailures: number;
+  /** Counts per decision kind, keys sorted so reports are comparable diff-to-diff. */
+  readonly decisionsByKind: Readonly<Record<string, number>>;
+  /** Sum of measured decision latency, including failed consultations. */
+  readonly decisionLatencyMs: number;
+  /** Tokens decisions reported. Separate from model-turn tokens. */
+  readonly decisionUsage: AIUsage;
+  readonly decisionTokens: number;
+  /** Cost of decisions that could be priced. */
+  readonly decisionCost: Cost;
+  /** False when any consultation was unpriced or reported no usage. */
+  readonly decisionCostComplete: boolean;
+  readonly decisionUnpricedCalls: number;
+  readonly decisionUsageUnavailableCalls: number;
   readonly open: boolean;
   readonly durationMs: number;
 }
@@ -192,12 +231,53 @@ export function computeTaskMetrics(input: TaskMetricsInput): TaskMetrics {
   }
 
   let decisionsByProvider = 0;
+  let decisionsDeterministic = 0;
+  let decisionFallbacks = 0;
+  let decisionLatencyMs = 0;
+  let decisionUsage = emptyUsage();
+  let decisionCost = zeroCost();
+  let decisionUnpricedCalls = 0;
+  let decisionUsageUnavailableCalls = 0;
+  const decisionsByKind = new Map<string, number>();
   for (const decision of input.decisions) {
-    if (decision.decidedBy === "decision-provider") {
-      decisionsByProvider += 1;
-    }
     if (decision.outcome === "escalated") {
       escalations += 1;
+    }
+    if (decision.kind !== undefined) {
+      decisionsByKind.set(
+        decision.kind,
+        (decisionsByKind.get(decision.kind) ?? 0) + 1,
+      );
+    }
+    decisionLatencyMs += assertNonNegativeInteger(
+      decision.latencyMs ?? 0,
+      "decision.latencyMs",
+    );
+    const answeredBy: DecisionAnswerSource = answerSourceOf(decision);
+    switch (answeredBy) {
+      case "provider":
+        decisionsByProvider += 1;
+        if (decision.usage !== undefined) {
+          decisionUsage = addUsage(decisionUsage, decision.usage);
+        }
+        if (decision.usageReported !== true) {
+          // No usage was reported, so this consultation's token count is unknown
+          // rather than zero — the same honesty rule as an unpriced call (ADR-035).
+          decisionUsageUnavailableCalls += 1;
+        }
+        if (decision.cost === undefined) {
+          // Usage that could not be priced is reported as unpriced, never as free.
+          decisionUnpricedCalls += 1;
+        } else {
+          decisionCost = addCost(decisionCost, decision.cost);
+        }
+        break;
+      case "fallback":
+        decisionFallbacks += 1;
+        break;
+      case "deterministic":
+        decisionsDeterministic += 1;
+        break;
     }
   }
 
@@ -244,10 +324,48 @@ export function computeTaskMetrics(input: TaskMetricsInput): TaskMetrics {
     escalations,
     decisions: input.decisions.length,
     decisionsByProvider,
+    decisionsDeterministic,
+    decisionFallbacks,
+    decisionFailures: assertNonNegativeInteger(
+      input.decisionFailures ?? 0,
+      "decisionFailures",
+    ),
+    decisionsByKind: Object.fromEntries(
+      [...decisionsByKind.entries()].sort((a, b) =>
+        a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0,
+      ),
+    ),
+    decisionLatencyMs,
+    decisionUsage,
+    decisionTokens: totalTokens(decisionUsage),
+    decisionCost,
+    decisionCostComplete:
+      decisionUnpricedCalls === 0 && decisionUsageUnavailableCalls === 0,
+    decisionUnpricedCalls,
+    decisionUsageUnavailableCalls,
     open,
     durationMs:
       endedAt === undefined ? 0 : durationMsFrom(input.startedAt, endedAt),
   };
+}
+
+/**
+ * Which layer answered a recorded decision.
+ *
+ * A record written before the answer source was recorded names the same thing in the
+ * older vocabulary (`decidedBy`), so it is classified rather than dropped: a report
+ * whose parts do not add up to its own total is a report nobody can trust. Exported
+ * because the task report and `ai decision` count the same log, and counting it two
+ * ways is how two commands start disagreeing about the same facts.
+ */
+export function answerSourceOf(decision: {
+  readonly answeredBy?: DecisionAnswerSource;
+  readonly decidedBy?: DecidedBy;
+}): DecisionAnswerSource {
+  return (
+    decision.answeredBy ??
+    (decision.decidedBy === "decision-provider" ? "provider" : "deterministic")
+  );
 }
 
 const NUMBER_FORMAT = new Intl.NumberFormat("en-US");
@@ -260,6 +378,26 @@ function formatDuration(ms: number): string {
   const minutes = Math.floor(ms / 60_000);
   const seconds = Math.floor((ms % 60_000) / 1000);
   return `${minutes}m ${seconds}s`;
+}
+
+/**
+ * Decision cost, with an honest note about what it leaves out.
+ *
+ * Exported because `ai task usage` and `ai task decisions` both report it: one place
+ * decides how incompleteness is phrased, so the two commands cannot describe the same
+ * number two different ways.
+ */
+export function formatDecisionCost(metrics: TaskMetrics): string {
+  const incomplete: string[] = [];
+  if (metrics.decisionUnpricedCalls > 0) {
+    incomplete.push(`${metrics.decisionUnpricedCalls} unpriced`);
+  }
+  if (metrics.decisionUsageUnavailableCalls > 0) {
+    incomplete.push(`${metrics.decisionUsageUnavailableCalls} without usage`);
+  }
+  return incomplete.length === 0
+    ? formatCost(metrics.decisionCost)
+    : `${formatCost(metrics.decisionCost)} (lower bound; ${incomplete.join("; ")})`;
 }
 
 /** Human-readable report. Presentation only; `--json` is the stable contract. */
@@ -309,7 +447,19 @@ export function formatTaskMetrics(metrics: TaskMetrics): string {
     `Retries: ${formatCount(metrics.retries)}`,
     `Escalations: ${formatCount(metrics.escalations)}`,
     `Decisions: ${formatCount(metrics.decisions)} ` +
-      `(${formatCount(metrics.decisionsByProvider)} by decision provider)`,
+      `(${formatCount(metrics.decisionsByProvider)} by decision provider, ` +
+      `${formatCount(metrics.decisionsDeterministic)} deterministic, ` +
+      `${formatCount(metrics.decisionFallbacks)} fallback)`,
+    ...(metrics.decisionFailures === 0
+      ? []
+      : [`Decision failures: ${formatCount(metrics.decisionFailures)}`]),
+    ...(metrics.decisions === 0
+      ? []
+      : [
+          `Decision latency: ${formatCount(metrics.decisionLatencyMs)}ms`,
+          `Decision tokens: ${formatCount(metrics.decisionTokens)}`,
+          `Decision cost: ${formatDecisionCost(metrics)}`,
+        ]),
     `Duration: ${metrics.open ? "open" : formatDuration(metrics.durationMs)}`,
   ].join("\n");
 }

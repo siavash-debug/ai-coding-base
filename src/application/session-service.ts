@@ -3,7 +3,10 @@ import { type IdFactory, sessionId as toSessionId } from "../core/ids.js";
 import type { EventActor } from "../observability/events.js";
 import type { AIUsage } from "../observability/usage.js";
 import type { OperationKind } from "../decisions/risk.js";
-import { type LlmFailureKind } from "../ports/llm-provider.js";
+import {
+  type LlmContentPresence,
+  type LlmFailureKind,
+} from "../ports/llm-provider.js";
 import {
   type AgentSession,
   type TerminalAgentSessionStatus,
@@ -73,6 +76,8 @@ export interface SessionLlmFailure {
   readonly attempts: number;
   readonly retryable: boolean;
   readonly statusCode?: number;
+  /** What a 2xx body carried, for `malformed-response` (structure only). */
+  readonly contentPresence?: LlmContentPresence;
   readonly latencyMs?: number;
   /** A failed call still belongs to a selection, and the log should say so. */
   readonly contextSelectionId?: string;
@@ -265,6 +270,9 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
           ...(failure.statusCode === undefined
             ? {}
             : { statusCode: failure.statusCode }),
+          ...(failure.contentPresence === undefined
+            ? {}
+            : { contentPresence: failure.contentPresence }),
           ...(failure.latencyMs === undefined
             ? {}
             : { latencyMs: failure.latencyMs }),

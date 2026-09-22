@@ -1839,22 +1839,36 @@ graph LR
   C --> D["Phase D<br/>real provider + approval resume + locking ✅"]
   D --> E["Phase E<br/>deterministic context engine ✅"]
   E --> F["Phase F<br/>policy enforcement + isolation adapters"]
-  F --> G["Phase G<br/>engineering memory + ADRs"]
-  G --> H["Phase H<br/>plugins + replay/checkpoints"]
+  F --> G["Phase G<br/>decision layer (JEV) ✅"]
+  G --> H["Phase H<br/>semantic retrieval + MongoDB vector search"]
   H --> I["Phase I<br/>dashboard (optional)"]
 ```
 
-| Phase    | Deliverable                                                                                                                                                               | Exit criteria                                                                                                                                                                                                                                       |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **A** ✅ | Baseline workspace, agent/task contracts, verification pipeline                                                                                                           | `verify.sh` green on Linux CI                                                                                                                                                                                                                       |
-| **B** ✅ | `V2-ARCHITECTURE.md`, `DECISIONS.md`, pure domain skeleton, unit tests                                                                                                    | RFC internally consistent; domain typechecks, tests pass, no vendor coupling                                                                                                                                                                        |
-| **C** ✅ | JSONL event store, file task repository, application services, trace read model, gates, CLI                                                                               | A real task can be created, run, traced and reported from its own events                                                                                                                                                                            |
-| **D** ✅ | One real provider adapter (behind a bounded retry decorator), approval grant consumption and resume, append coordination for the JSONL log                                | Real token/cost/failure metrics from a real call; an approved run resumes and the grant is recorded as consumed; two writers cannot append one sequence                                                                                             |
-| **E** ✅ | Deterministic context engine: bounded discovery, exclusion policy, explainable scoring, hard token budget, `ContextSelectionStarted`/`ContextSelected`, `ai task context` | Same state ⇒ same selection; the budget is never exceeded; every selected file can answer "why was I included?" from its events. A _comparative_ token-reduction experiment is not claimed — §36.9 records the baseline it will be measured against |
-| **F**    | Policy enforcement in the execution path, approval workflow, process/container sandbox adapters                                                                           | No `high`/`critical` operation executes without a recorded approval                                                                                                                                                                                 |
-| **G**    | Engineering memory + ADR workflow + context integration                                                                                                                   | Memory is project-scoped and AI writes stay `proposed` until accepted                                                                                                                                                                               |
-| **H**    | Plugin loader + replay/checkpoint store                                                                                                                                   | Trace replay exact; decision replay reports non-determinism honestly                                                                                                                                                                                |
-| **I**    | Optional dashboard over the JSON projection                                                                                                                               | Dashboard removable without touching core                                                                                                                                                                                                           |
+| Phase    | Deliverable                                                                                                                                                                                         | Exit criteria                                                                                                                                                                                                                                       |
+| -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **A** ✅ | Baseline workspace, agent/task contracts, verification pipeline                                                                                                                                     | `verify.sh` green on Linux CI                                                                                                                                                                                                                       |
+| **B** ✅ | `V2-ARCHITECTURE.md`, `DECISIONS.md`, pure domain skeleton, unit tests                                                                                                                              | RFC internally consistent; domain typechecks, tests pass, no vendor coupling                                                                                                                                                                        |
+| **C** ✅ | JSONL event store, file task repository, application services, trace read model, gates, CLI                                                                                                         | A real task can be created, run, traced and reported from its own events                                                                                                                                                                            |
+| **D** ✅ | One real provider adapter (behind a bounded retry decorator), approval grant consumption and resume, append coordination for the JSONL log                                                          | Real token/cost/failure metrics from a real call; an approved run resumes and the grant is recorded as consumed; two writers cannot append one sequence                                                                                             |
+| **E** ✅ | Deterministic context engine: bounded discovery, exclusion policy, explainable scoring, hard token budget, `ContextSelectionStarted`/`ContextSelected`, `ai task context`                           | Same state ⇒ same selection; the budget is never exceeded; every selected file can answer "why was I included?" from its events. A _comparative_ token-reduction experiment is not claimed — §36.9 records the baseline it will be measured against |
+| **F** ✅ | Policy, capability and sandbox enforcement: deny-by-default access policy, typed capabilities, `OperationGateway`, local filesystem/process/environment/network boundaries, approval integration    | No operation executes without passing capability → envelope → policy → boundary admission → approval; direct adapter access fails closed (ADR-048, ADR-050)                                                                                         |
+| **G** ✅ | The decision layer: a closed vocabulary of bounded decision kinds, `DecisionProvider` port, deterministic gates, validation, fallbacks, a real JEV HTTP adapter, decision budgets and `ai decision` | Every bounded question is recorded with provider, outcome, reason and cost; JEV cannot authorise, widen scope or bypass any Phase F check (ADR-052)                                                                                                 |
+| **H**    | Semantic retrieval / MongoDB vector search                                                                                                                                                          | Retrieval is project-scoped, explicitly opted into, and never a precondition for Phase E selection                                                                                                                                                  |
+| **I**    | Optional dashboard over the JSON projection                                                                                                                                                         | Dashboard removable without touching core                                                                                                                                                                                                           |
+
+### 33.1 Queued, not started
+
+Two proposals are recorded here so the roadmap cannot be read as silently redefined. Neither is
+implemented, neither is begun, and neither is a precondition for anything above.
+
+- **Multi-model orchestration (queued).** A model registry with explicit capability and cost/latency
+  profiles, per-user model sets, and a second provider adapter (OpenRouter or any other) so the
+  decision layer can choose among _models_ rather than only among _paths_. §38.8 is explicit that
+  nothing in Phase G selects a model; this proposal is what would change that, and it must arrive as
+  its own phase with its own ADRs. It is executable only after Phase G is frozen and verified.
+- **A real OS/container/namespace execution boundary (queued).** Phase F's boundaries are in-process
+  and labelled as such (§37.6). Kernel-level isolation is a later architectural phase, not Phase G and
+  not Phase H.
 
 ---
 
@@ -2262,6 +2276,288 @@ src/
 
 ---
 
+## 37. Phase F status — policy, capability and sandbox enforcement
+
+Phase F changes what the platform is _permitted_ to do. Through Phase E it could plan, select context
+and record what happened; the only gate was the risk policy, which answers "how much oversight does
+this need?" rather than "is this permitted, and where may it reach?". Phase F adds the second question
+and enforces it at the operation, not at the call site.
+
+### 37.1 The enforcement pipeline
+
+```text
+Task Contract → Policy → Capability check → Approval check → Resource boundary → Operation
+                                                                                    ↓
+                                                                               Event Store → Trace
+```
+
+Each step can only ever _narrow_ the one above it:
+
+```text
+LLM output       ≠ permission        agent request  ≠ authorization
+human approval   ≠ policy override   task intent    ≠ authorization
+```
+
+`src/application/operation-gateway.ts` is the whole of it. One method, and the boundary it holds is not
+reachable through it (ADR-045). The order is the security argument: a capability is **derived** from
+the operation kind, checked against the attempt's declared envelope, then evaluated against policy,
+then admitted by the boundary, and only then — if policy said so — handed to the approval ledger. The
+ledger is never consulted for a denied capability, which is what makes "approval confirms, it never
+opens a boundary" true rather than aspirational (ADR-049).
+
+### 37.2 Policy, capabilities and grants
+
+A `Capability` is a typed request for a class of access, not a permission. The vocabulary is closed
+(`filesystem.read`, `filesystem.write`, `process.execute`, `network.connect`, `environment.read`,
+`git.read`, `git.write`), each capability maps to exactly one operation kind, and
+`capabilityForRequest` is the only mapping from an operation to the capability it needs — so a request
+cannot claim a cheaper capability for an expensive operation.
+
+The policy is pure and total. `evaluateAccess` reads no clock, touches no filesystem and calls no
+provider, and a malformed target is a denial rather than a thrown error. Its defaults are restrictive
+to the point of uselessness on purpose: an unconfigured project may read and `git.read` inside its own
+workspace, and nothing else. Every refusal carries a `PolicyReasonCode`, and only `ALLOWED` is not a
+denial (ADR-046).
+
+A grant is bound to project, workspace, task, risk level and operation kind, is consumed exactly once,
+and may expire. An authority established within one attempt covers later gates inside its own
+boundaries and nothing beyond them (ADR-037). `ai policy` shows the effect table and the envelope;
+`ai policy --check` performs the identical evaluation without performing, recording or consuming
+anything, and answers `allowed` (exit 0), `denied` (1) or `approval-required` (1, distinct by status)
+— an uninterpretable target exits 2 and evaluates nothing.
+
+### 37.3 The sandbox
+
+One object per workspace, fixed at construction, refusing a mismatched scope (ADR-048). Four
+boundaries compose it, and each re-checks its own admission inside `perform` rather than trusting the
+verdict it was handed:
+
+| Boundary    | Enforced                                                                                                                                                                                                                                                                    |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| filesystem  | workspace-relative refs only; `path.relative` containment with platform case folding; `realpath` of the root and of the target's nearest existing ancestor; a configured root that escapes the workspace refused; credential-shaped paths and `.git/` write refused by name |
+| process     | argv arrays with no shell on any code path; allow/deny lists checked in the boundary as well as in policy; workspace-relative `cwd` fence; hard timeout with capped output; filtered child environment                                                                      |
+| network     | denied unless enabled, host allowlist enforced at the transport, operation hosts kept separate from provider hosts, query strings stripped before anything is recorded                                                                                                      |
+| environment | allow/deny lists over a `get(name)`-only port; no enumeration; a refused variable is indistinguishable from a missing one                                                                                                                                                   |
+
+**What it is not.** Not a container, not a VM, not a namespace, not a seccomp filter, not a
+user-switch, and not a defence against an already-compromised host. A child process runs with the
+platform's own privileges. The claims it does make are the ones its tests prove.
+
+**Network limitation, stated plainly.** Host allowlisting is enforced at the transport, but it is not
+a network sandbox. The check is on the _hostname the request was given_, made once, before the first
+byte: DNS rebinding, a listed name that resolves to a loopback or private address, and a redirect from
+a listed host to an unlisted one are all outside the current guarantee (the `fetch`-based transport
+follows redirects and does not re-check the target). The guarantee is therefore "no request is
+_initiated_ to an unlisted host", not "no packet reaches an unlisted host". Closing this belongs to a
+later execution-boundary phase, not to Phase F.
+
+**Platform difference, stated rather than smoothed over.** On Windows, Node gives a child a fixed set
+of OS-level variables (`HOMEDRIVE`, `HOMEPATH`, `LOGONSERVER`, `PATH`, `SYSTEMDRIVE`, `SYSTEMROOT`,
+`TEMP`, `USERDOMAIN`, `USERNAME`, `USERPROFILE`, `WINDIR`) even when an explicit `env` is passed. The
+guarantee therefore is precise: _every variable this process holds is dropped unless policy allowlists
+it; those OS facts survive and are not controllable by policy._ They are enumerated in
+`WINDOWS_CHILD_INHERITED_VARIABLES` and reported by `ai doctor`.
+
+### 37.4 Operation-level suspension
+
+An operation that policy marks `approval-required` suspends the task the way a risk-gate suspension
+does: the request is recorded, the session ends as aborted, the task stays `in_progress`, and
+`ai task approve <task-id> --resume` consumes the grant once and continues the attempt. Two honest
+details: the operation is attempted _during_ the agent attempt, so an operation-level suspension can
+have spent the model turn that preceded it (the risk gate is what suspends before anything is spent);
+and enforcement events are written when the operation is _requested_, while a runner reports its own
+steps afterwards — so `occurredAt` is the wall-clock order and `sequence` is the record order, and the
+two differ within one attempt.
+
+### 37.5 Audit and trace
+
+`CapabilitiesDeclared`, `CapabilityCheckRequested`/`Completed`, `OperationStarted`/`Completed`/
+`Failed`, `OperationDenied` and `SandboxViolation` answer _who, what, where, when, why, result_: actor,
+project, workspace, task, session where one is open, capability, operation kind, target kind, a
+redacted target, a reason code, and the approval reference when one applies. Never a secret, never a
+prompt, never an absolute host path, never a raw result — a result is recorded by size in its own unit
+(bytes, entries, HTTP status).
+
+The trace adds `POLICY` (declared envelopes, every check with its verdict and reason, every refusal)
+and `OPERATIONS` (authorised operations with outcome, duration and size) to the existing projection,
+plus integrity checks that report an unanswered check, an unterminated operation, or an `allowed`
+verdict no declared envelope contains. A foreign task id still returns `found: false` with an empty
+projection and no information about any other scope (§36.8).
+
+### 37.6 Security invariants proven by tests
+
+1. No capability → no operation.
+2. Policy deny → no operation.
+3. Approval never overrides a hard policy deny.
+4. Approval never widens project, workspace or task scope.
+5. A filesystem operation cannot escape its sandbox (traversal, absolute path, drive letter, UNC
+   prefix, link escape, configured-root escape).
+6. Process execution cannot inherit an unrestricted environment.
+7. Network access is denied unless explicitly authorised for that host.
+8. LLM output is never authorisation (there is no parameter through which it could become any).
+9. Secrets never enter an event, a trace or an error.
+10. Every denied security-sensitive operation has a reconstructable reason.
+
+### 37.7 Deliberately not implemented in Phase F
+
+- No JEV, no decision-provider involvement: policy enforcement is deterministic, and the
+  `DecisionProvider` port remains an optional future routing layer.
+- No container/VM isolation, no remote execution, no Docker or Kubernetes orchestration, no plugin
+  surface, no autonomous GitHub or deployment operations, and no unrestricted shell.
+- No network sandbox proper: hostname allowlisting only, with no DNS- or address-level enforcement
+  (§37.3), and no kernel/container/user isolation of any kind.
+- No distributed coordination; append coordination remains single-machine (§35.5).
+- No autonomous multi-step loop and no uncontrolled retries.
+
+### 37.8 Layout added in Phase F
+
+```text
+src/
+├── policy/               # capability vocabulary, reason codes, targets, path arithmetic, access policy
+├── ports/
+│   └── operation.ts      # OperationRequest/Result, SandboxBoundary, OperationGateway
+├── adapters/sandbox/     # local fs, process, network and environment boundaries + the local sandbox
+└── application/
+    ├── operation-gateway.ts  # the enforcement pipeline
+    └── policy-check.ts       # the dry run `ai policy --check` uses
+```
+
+---
+
+## 38. Phase G status — the decision layer
+
+Phase G gives the platform a place to put _bounded judgement_: retry, tool choice, routing, ranking,
+relevance, contextual risk, completion and human escalation. It does not move enforcement, reasoning
+or ownership, and it does not make the platform autonomous.
+
+### 38.1 Three layers, three kinds of authority
+
+```text
+DETERMINISTIC CODE  owns certainty        rules, schema validation, policy, capability, approval,
+                                          sandbox containment, budgets, secret protection, scopes,
+                                          state machines, event integrity
+JEV (decision layer) decides bounded questions   retry, tool, route, rank, relevance, risk,
+                                          completion, escalation — recommend, never authorise
+FRONTIER LLM        reasons and generates  architecture, code, novel problems (§35)
+HUMAN               owns consequences      approvals, grants, closing a task
+```
+
+The order of consultation is the architecture. Code answers first (§38.2), and a decision layer is
+reached only for a question code cannot settle. This is why the platform is not a thin wrapper around
+a model, and why adding JEV did not add a network round-trip to any deterministic step.
+
+### 38.2 The decision pipeline
+
+```text
+bounded question (candidates, reason codes, bounds — all built by deterministic code)
+    ↓  validate the question               (assertDomainDecisionSpec; malformed questions are refused)
+    ↓  certainty gate                      (code answers; the provider is never consulted)
+    ↓  absent-layer gate                   (no provider: answer from code, recorded as such)
+    ↓  budget gate                         (exhausted: answer from code, recorded as a fallback)
+    ↓  capability gate                     (a provider that cannot handle the question is not asked)
+    ↓  ONE provider call                   (no retry: retry policy belongs to the layer that owns it)
+    ↓  deterministic validation            (reject, never repair — ADR-053)
+    ↓  deterministic fallback              (per domain, recorded with its reason)
+    ↓  record                              (`DecisionRequested` / `DecisionCompleted` / `DecisionFailed`
+                                            / `DecisionFallbackUsed`, scope-bound)
+```
+
+### 38.3 The eight decision domains
+
+| Domain             | What may change                                        | Deterministic gate when…                        |
+| ------------------ | ------------------------------------------------------ | ----------------------------------------------- |
+| `routing`          | which of the registered routes the attempt takes       | only one route is registered                    |
+| `tool-selection`   | which permitted tool the runtime uses                  | only one tool is permitted                      |
+| `risk-assessment`  | the risk the policy gate sees — it may only _raise_ it | the baseline is already `critical`              |
+| `retry`            | whether to re-run the attempt, within the hard cap     | the failure is not retryable, or the cap is met |
+| `completion`       | nothing: an assessment for a human and for the record  | verification failed, or no evidence exists      |
+| `ranking`          | the order of supplied candidates                       | one candidate                                   |
+| `relevance`        | whether bounded candidates are relevant                | — (conservative default: not established)       |
+| `human-escalation` | a recommendation to a human — never a request or grant | a security or policy refusal                    |
+
+### 38.4 Security: why a decision layer cannot gain authority
+
+- **It is asked, not obeyed.** An answer is validated (candidate membership, legal outcome, complete
+  ordering, confidence range, closed-vocabulary explanation) and otherwise _rejected_.
+- **It cannot reach the boundary.** A decision produces a route id, a tool id, a risk level, a
+  recommendation, or a reason code. None of those is an operation, a capability, an approval or a
+  scope. Everything that acts still goes through `OperationGateway` (ADR-045), unchanged.
+- **Its candidates are supplied.** Route and tool candidate sets are built from the attempt's risk
+  profile and capability envelope; a decision may narrow them and cannot add to them (ADR-055).
+- **Its scope is constructed.** A coordinator is bound to one workspace/task/session at creation, and
+  a decision recorded without a task is invisible to every task trace — which is exactly what keeps a
+  decision from leaking across a scope.
+- **Its budgets are hard.** Consultations are counted from the log, and cost from the project's rate
+  table; an exhausted budget stops consultation _before_ the provider is called.
+- **Nothing it says is persisted verbatim.** The event log records the reason _code_, never the
+  provider's prose, and never a credential (ADR-035, ADR-053).
+
+### 38.5 Failure semantics
+
+`DECISION_FAILURE_KINDS` is the shared provider taxonomy (`auth`, `rate-limit`, `timeout`,
+`network`, `server`, `malformed-response`, `refused`, `unavailable`, `unknown`), and
+`fallbackReasonForFailure` is a total function from it onto the recorded fallback reasons. There is no
+failure category that reaches the engine without a recorded reason for the answer that replaced it.
+
+The platform never reads "the decision layer was unavailable" as "allow": a fallback is always the
+_conservative_ answer — stop, keep the baseline risk, do not claim completion, recommend review, do not
+assert relevance — and the run continues down the deterministic path it would have taken with no
+decision layer at all.
+
+### 38.6 Cost, budget and what is measured
+
+Decisions are part of the AI budget: consultation count, latency, tokens reported, estimated cost
+where a rate exists, timeout count, retry count and fallback count. Unpriced stays unpriced and
+"no usage reported" stays unknown — a decision cost line says `(lower bound; N unpriced; M without
+usage)` rather than printing an incomplete total as if it were the whole story.
+
+### 38.7 Observability
+
+- **Events:** `DecisionRequested`, `DecisionCompleted`, `DecisionFailed`, `DecisionFallbackUsed`,
+  carrying scope, kind, the decision id (which pairs a question with its answer exactly), the
+  candidate ids, the answer source, provider id, reason code, confidence, usage, cost and latency.
+- **Trace:** a `DECISIONS` section (every question, how it was answered, by which layer, why, and
+  what it cost) plus `decisionFailures`, and decision aggregates in the task metrics.
+- **CLI:** `ai decision [--json]` (what the layer is, its configured limits, its fallback policy, and
+  the decisions recorded in this scope) and `ai task decisions <task-id> [--json]`. Both are offline.
+- **Doctor:** `decision-layer` (the configured provider, its declared kinds and limits — a disabled
+  layer is `ok`, because the platform is complete without one) and `decision-audit` (recorded
+  decisions are reconstructable, and the fallback policy is total). Neither check calls anything.
+
+### 38.8 Deliberately not implemented in Phase G
+
+- **No multi-model routing.** One LLM provider and one model id per project. The domains exist for
+  model-level decisions; nothing selects a model yet.
+- **No JEV-specific types in the domain**, no JEV SDK, and no mandatory JEV: with
+  `decision.provider: "disabled"` (the default) every question is answered by code and recorded.
+- **No embeddings, semantic retrieval, vector search or MongoDB.** `relevance` works only over
+  supplied candidates.
+- **No decision cache** (no key, scope, TTL, invalidation or replay semantics have been decided).
+- **No reproducible replay of a provider's decision.** Recorded is not the same as reproducible, and
+  the platform claims only the former.
+- **No container/VM isolation, no distributed coordination, no autonomous multi-step loop, no
+  streaming, no additional LLM vendors.**
+
+### 38.9 Layout added in Phase G
+
+```text
+src/
+├── decisions/
+│   ├── domains.ts        # the eight bounded questions, their bounds, gates and interpretation
+│   ├── engine.ts         # validate → certainty → capability → one call → validate → fallback
+│   ├── fallback.ts       # the per-domain fallback registry (one table, deterministic)
+│   ├── validate.ts       # deterministic validation of an untrusted answer
+│   ├── provider.ts       # the port, the failure taxonomy, the abstaining provider
+│   └── decision.ts       # the decision record (answered by whom, at what cost)
+├── adapters/decision/
+│   └── jev-http-provider.ts   # the one real decision provider, behind the port
+├── application/
+│   └── decision-coordinator.ts # scope-bound: budget, recording, ask/validate/fallback
+└── cli/commands/decision.ts    # `ai decision`
+```
+
+---
+
 ## Appendix A — target source layout
 
 Created in **Phase B**:
@@ -2300,11 +2596,31 @@ Added in later phases (not created yet):
 
 ```
 src/
-├── ai/                   # Phase E  (context/, tools/)
-├── security/             # Phase F  (sandbox, grants, command execution)
-├── memory/               # Phase G
-└── plugins/              # Phase H
+├── memory/               # a later phase (engineering memory, project-scoped)
+└── plugins/              # a later phase
 ```
+
+Created in **Phases E and F**:
+
+```
+src/
+├── context/              # candidate discovery, matching, scoring, selection
+├── policy/               # capability vocabulary, reason codes, targets, path arithmetic, access policy
+├── ports/
+│   ├── context-engine.ts # the context port
+│   └── operation.ts      # OperationRequest/Result, SandboxBoundary, OperationGateway
+├── adapters/
+│   ├── repository/       # filesystem reader that respects the exclusion policy
+│   ├── git/              # change provider (degrades explicitly when Git is absent)
+│   └── sandbox/          # local fs, process, network and environment boundaries + the local sandbox
+└── application/
+    ├── context-service.ts    # selection + recording
+    ├── operation-gateway.ts  # the enforcement pipeline
+    └── policy-check.ts       # the dry run `ai policy --check` uses
+```
+
+Created in **Phase G**: the decision layer (`decisions/`, `adapters/decision/`,
+`application/decision-coordinator.ts`, `cli/commands/decision.ts`) — see §38.9.
 
 ## Appendix B — invariants checklist (review aid)
 
@@ -2337,3 +2653,19 @@ src/
 - [ ] Task → Session → Decision/Context/LLM/Tool/Test → Event is unbroken.
 - [ ] Task status only changes through the declared transition table.
 - [ ] No empty speculative directories; every directory has justified code in it.
+- [ ] Every operation passes through the enforcement boundary; no adapter is reachable around it.
+- [ ] A refusal carries a stable reason code and never a secret, a resolved link target or an absolute
+      host path.
+- [ ] An approval never reaches a capability policy denies, and never widens a scope.
+- [ ] Filesystem containment is by resolution, and a configured root cannot escape the workspace.
+- [ ] A child process runs without a shell, inside the workspace, with a filtered environment.
+- [ ] Operation egress and provider egress are separate allowlists.
+- [ ] A decision layer is consulted only for a bounded question code cannot answer.
+- [ ] No provider answer reaches execution without deterministic validation.
+- [ ] A decision may recommend; it can never grant a capability, approve an operation, or change a
+      task's state.
+- [ ] Decision candidates come from code, and an answer naming anything else is rejected.
+- [ ] A decision budget is enforced before the provider is called, and counted from the log.
+- [ ] A missing decision layer is recorded as missing, not as a failure.
+- [ ] Each decision documents its questions and answers, and every answer still goes through the
+      enforcement boundary; a decision layer cannot grant a capability or bypass an approval.

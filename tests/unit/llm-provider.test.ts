@@ -93,7 +93,7 @@ describe("openai-compatible provider: request building", () => {
     // The credential must reach the provider; it is the *reporting* path that must
     // never contain it.
     expect(request.headers["authorization"]).toBe(`Bearer ${FIXTURE_KEY}`);
-    const body = JSON.parse(request.body) as Record<string, unknown>;
+    const body = JSON.parse(String(request.body)) as Record<string, unknown>;
     expect(body["model"]).toBe("fixture-model");
     expect(body["messages"]).toEqual([
       { role: "system", content: "be brief" },
@@ -122,7 +122,7 @@ describe("openai-compatible provider: request building", () => {
 
     expect(transport.requests[0].url).toBe(`${BASE_URL}/chat/completions`);
     expect(transport.requests[0].timeoutMs).toBe(1234);
-    const body = JSON.parse(transport.requests[0].body) as Record<
+    const body = JSON.parse(String(transport.requests[0].body)) as Record<
       string,
       unknown
     >;
@@ -236,6 +236,55 @@ describe("openai-compatible provider: response normalisation", () => {
     await expect(provider.complete(REQUEST)).rejects.toMatchObject({
       failureKind: "malformed-response",
     });
+  });
+});
+
+/**
+ * The distinction a live free-tier run made concrete: a successful *request* is not a
+ * usable *completion*.
+ *
+ * These are regression tests, and they assert the strict behaviour on purpose — the
+ * adapter must keep refusing a response that carries no answer text, so that a 200
+ * whose content was consumed by the model's reasoning is reported as a failed step
+ * rather than handed upward as an answer. Relaxing this to make a free model "pass"
+ * would turn a visible dead end into a silent one.
+ */
+describe("openai-compatible provider: content-less responses", () => {
+  it("classifies HTTP 200 with null content as a malformed response", async () => {
+    const { provider } = providerWith([
+      jsonResponse(
+        chatCompletionBody({
+          nullContent: true,
+          finishReason: "length",
+          reasoning: "private chain of thought that is not an answer",
+          reasoningTokens: 96,
+        }),
+      ),
+    ]);
+    const error = await failureOf(() => provider.complete(REQUEST));
+    expect(error.failureKind).toBe("malformed-response");
+    // A status code is carried for an operator; the body and the reasoning are not.
+    expect(error.details["statusCode"]).toBe(200);
+    expect(error.retryable).toBe(false);
+    expect(error.message).not.toContain("chain of thought");
+    expect(error.details["body"]).toBeUndefined();
+    expect(error.details["reasoning"]).toBeUndefined();
+  });
+
+  it("uses answer text when a response carries reasoning alongside it", async () => {
+    const { provider } = providerWith([
+      jsonResponse(
+        chatCompletionBody({
+          content: "the answer",
+          reasoning: "private chain of thought",
+          reasoningTokens: 12,
+        }),
+      ),
+    ]);
+    const response = await provider.complete(REQUEST);
+    expect(response.content).toBe("the answer");
+    // Reasoning tokens are counted for accounting and still never surface as content.
+    expect(response.usage?.reasoningTokens).toBe(12);
   });
 });
 

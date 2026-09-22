@@ -64,7 +64,8 @@ export function createFetchTransport(
         response = await doFetch(request.url, {
           method: request.method,
           headers: { ...request.headers },
-          body: request.body,
+          // A bodyless method must not be handed a body, not even an empty one.
+          ...(request.body === undefined ? {} : { body: request.body }),
           signal: AbortSignal.timeout(request.timeoutMs),
         });
       } catch (error) {

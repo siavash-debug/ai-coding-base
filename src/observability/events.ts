@@ -13,6 +13,7 @@ import {
   assertNonNegativeInteger,
   assertOneOf,
   assertStringArray,
+  assertUnitInterval,
   containsSecretLikeValue,
 } from "../core/validation.js";
 import { CONTEXT_EXCLUSION_REASONS } from "../context/selection.js";
@@ -25,14 +26,32 @@ import {
   type ResolvedDecisionOutcome,
 } from "../decisions/decision.js";
 import {
+  DECISION_ANSWER_SOURCES,
+  DECISION_FALLBACK_REASONS,
+  DECISION_PROVIDER_EXECUTION_SOURCES,
+  type DecisionAnswerSource,
+  type DecisionFallbackReason,
+  type DecisionProviderExecutionSourceValue,
+} from "../decisions/domains.js";
+import {
+  DECISION_FAILURE_KINDS,
+  type DecisionFailureKind,
+} from "../decisions/provider.js";
+import {
   OPERATION_KINDS,
   type OperationKind,
   RISK_LEVELS,
   type RiskLevel,
 } from "../decisions/risk.js";
 import {
+  POLICY_REASON_CODES,
+  type PolicyReasonCode,
+} from "../policy/reason.js";
+import {
   LLM_FAILURE_KINDS,
+  type LlmContentPresence,
   type LlmFailureKind,
+  LLM_CONTENT_PRESENCE,
 } from "../ports/llm-provider.js";
 import {
   TERMINAL_AGENT_SESSION_STATUSES,
@@ -60,6 +79,8 @@ export const EVENT_TYPES = [
   "ContextSelected",
   "DecisionRequested",
   "DecisionCompleted",
+  "DecisionFailed",
+  "DecisionFallbackUsed",
   "LLMRequestStarted",
   "LLMRequestCompleted",
   "LLMRequestFailed",
@@ -71,6 +92,15 @@ export const EVENT_TYPES = [
   "HumanApprovalRequested",
   "HumanApprovalGranted",
   "HumanApprovalConsumed",
+  "CapabilitiesDeclared",
+  "CapabilityCheckRequested",
+  "CapabilityCheckCompleted",
+  "OperationStarted",
+  "OperationCompleted",
+  "OperationFailed",
+  "OperationDenied",
+  "SandboxViolation",
+  "OrchestrationPlanned",
 ] as const;
 
 export type EventType = (typeof EVENT_TYPES)[number];
@@ -170,6 +200,18 @@ export interface EventPayloadMap {
     readonly kind: DecisionKind;
     readonly question: string;
     readonly optionCount: number;
+    /**
+     * The decision id, when the writer knew it at ask time.
+     *
+     * Present since Phase G, which is what lets a request be paired with its answer
+     * by identity instead of by kind. Absent in older logs, where the reader falls
+     * back to pairing in request order.
+     */
+    readonly decisionId?: string;
+    /** Candidate ids offered, so "what was on the table" is reconstructable. */
+    readonly optionIds?: readonly string[];
+    /** The closed explanation vocabulary the question could be answered with. */
+    readonly reasonCodes?: readonly string[];
   };
   DecisionCompleted: {
     readonly decisionId: string;
@@ -178,6 +220,59 @@ export interface EventPayloadMap {
     readonly decidedBy: DecidedBy;
     readonly selectedOptionId?: string;
     readonly latencyMs?: number;
+    /**
+     * Which layer answered: the deterministic gate, the provider, or the fallback.
+     * A fallback is always accompanied by `fallbackReason`, so "the decision layer
+     * was down" is never inferred after the fact (ADR-052).
+     */
+    readonly answeredBy?: DecisionAnswerSource;
+    readonly providerId?: string;
+    /**
+     * The provider-side model or version, when the provider named one.
+     *
+     * Recorded because pricing keys on `(providerId, modelId)`: without it a decision
+     * that reported usage could never be priced from the log.
+     */
+    readonly modelId?: string;
+    /** The explanation code the answer carried, from the offered vocabulary. */
+    readonly reasonCode?: string;
+    readonly confidence?: number;
+    /** Complete ordering, for questions that ask for one. */
+    readonly ranking?: readonly string[];
+    readonly fallbackReason?: DecisionFallbackReason;
+    readonly usage?: AIUsage;
+    readonly usageReported?: boolean;
+    /** Priced from the project rate table; absent when unpriced. */
+    readonly costMicros?: number;
+    /**
+     * How the provider that answered produced its answer, when attested.
+     *
+     * `live-sdk` means the TypeSafe adapter's real SDK boundary executed;
+     * `test-double` is the offline admission of a scripted provider. Absent for
+     * code-answered and fallback answers.
+     */
+    readonly executionSource?: DecisionProviderExecutionSourceValue;
+  };
+  /**
+   * A decision provider that failed to answer.
+   *
+   * Recorded separately from the answer it caused, because a failed provider and a
+   * provider that answered are different facts. Only the category and the counters
+   * are recorded: never the provider's message, and never a request body.
+   */
+  DecisionFailed: {
+    readonly decisionId: string;
+    readonly kind: DecisionKind;
+    readonly providerId: string;
+    readonly failureKind: DecisionFailureKind;
+    readonly attempts: number;
+  };
+  /** The deterministic fallback answered a bounded question. */
+  DecisionFallbackUsed: {
+    readonly decisionId: string;
+    readonly kind: DecisionKind;
+    readonly reason: DecisionFallbackReason;
+    readonly selectedOptionId?: string;
   };
   LLMRequestStarted: {
     readonly providerId: string;
@@ -222,6 +317,11 @@ export interface EventPayloadMap {
     readonly attempts: number;
     readonly retryable: boolean;
     readonly statusCode?: number;
+    /**
+     * What a 2xx body actually carried, for `malformed-response`: structure
+     * only, never the text itself (ADR-035).
+     */
+    readonly contentPresence?: LlmContentPresence;
     /** How long was spent before giving up, when it was measured. */
     readonly latencyMs?: number;
   };
@@ -266,6 +366,106 @@ export interface EventPayloadMap {
     readonly requestId: string;
     readonly riskLevel: RiskLevel;
     readonly operation?: OperationKind;
+  };
+  /**
+   * The capability envelope an attempt was given, recorded once up front.
+   *
+   * Every later capability check is answered against this list, so "was this
+   * capability ever declared for this attempt?" is answerable from the log alone
+   * rather than from the code that happened to be running.
+   */
+  CapabilitiesDeclared: {
+    readonly policyId: string;
+    readonly policyVersion: number;
+    readonly capabilities: readonly string[];
+  };
+  CapabilityCheckRequested: {
+    readonly checkId: string;
+    readonly capability: string;
+    readonly operation: OperationKind;
+    readonly targetKind: string;
+    readonly target: string;
+  };
+  CapabilityCheckCompleted: {
+    readonly checkId: string;
+    readonly capability: string;
+    readonly decision: CapabilityDecision;
+    readonly reasonCode: PolicyReasonCode;
+    readonly requiresApproval: boolean;
+    readonly riskLevel: RiskLevel;
+    readonly approvalRequestId?: string;
+  };
+  OperationStarted: {
+    readonly operationId: string;
+    readonly capability: string;
+    readonly operation: OperationKind;
+    readonly targetKind: string;
+    readonly target: string;
+  };
+  OperationCompleted: {
+    readonly operationId: string;
+    readonly ok: boolean;
+    readonly durationMs: number;
+    /**
+     * Size of the result in its own natural unit: bytes, entries or HTTP status.
+     * Never content, and never a count of anything the operation read.
+     */
+    readonly resultSize?: number;
+    readonly timedOut?: boolean;
+  };
+  OperationFailed: {
+    readonly operationId: string;
+    readonly capability: string;
+    readonly reasonCode: PolicyReasonCode;
+  };
+  OperationDenied: {
+    readonly capability: string;
+    readonly operation: OperationKind;
+    readonly targetKind: string;
+    readonly target: string;
+    readonly reasonCode: PolicyReasonCode;
+  };
+  /** A refusal that came from the boundary itself, not from policy. */
+  SandboxViolation: {
+    readonly capability: string;
+    readonly operation: OperationKind;
+    readonly targetKind: string;
+    readonly target: string;
+    readonly reasonCode: PolicyReasonCode;
+  };
+  /**
+   * The execution plan a multi-model run committed to, recorded before any call.
+   *
+   * This is the one artefact that cannot be reconstructed from the per-call events:
+   * which models were *candidates*, which were rejected and why, which plan variants
+   * existed, and which one was chosen. A run that dies on its first step still leaves
+   * an explanation of what it intended (ADR-056).
+   *
+   * Metadata only: model and provider ids, counters, reason codes and a reference to
+   * the context selection. No prompt, no completion, no context content.
+   */
+  OrchestrationPlanned: {
+    readonly planId: string;
+    readonly strategy: string;
+    readonly reasonCode: string;
+    readonly stepCount: number;
+    /** The model each step would use by deterministic ranking. */
+    readonly modelIds: readonly string[];
+    readonly providerIds: readonly string[];
+    readonly parallel: boolean;
+    readonly decomposed: boolean;
+    readonly routingMode: string;
+    readonly riskLevel: RiskLevel;
+    readonly maxModelCalls: number;
+    readonly candidateModelIds: readonly string[];
+    readonly rejectedModelIds: readonly string[];
+    /** True when every planned step had a known price. */
+    readonly priced: boolean;
+    readonly unpricedSteps: number;
+    /** Reference-usage estimate, not a recorded cost. Absent when any step is unpriced. */
+    readonly estimatedReferenceCostMicros?: number;
+    readonly contextSelectionId?: string;
+    readonly selectionReasonCode?: string;
   };
 }
 
@@ -346,9 +546,17 @@ type PayloadFieldKind =
   | "taskStatus"
   | "sessionStatus"
   | "failureKind"
+  | "contentPresence"
   | "timestamp"
   | "selectionRefs"
-  | "selectionExclusions";
+  | "selectionExclusions"
+  | "reasonCode"
+  | "capabilityDecision"
+  | "fallbackReason"
+  | "answerSource"
+  | "providerExecutionSource"
+  | "decisionFailureKind"
+  | "unit";
 
 interface PayloadFieldRule {
   readonly name: string;
@@ -371,7 +579,11 @@ const flag = (name: string, optional = false): PayloadFieldRule => ({
   kind: "boolean",
   optional,
 });
-const refs = (name: string): PayloadFieldRule => ({ name, kind: "string[]" });
+const refs = (name: string, optional = false): PayloadFieldRule => ({
+  name,
+  kind: "string[]",
+  optional,
+});
 const enumField = (
   name: string,
   kind: PayloadFieldKind,
@@ -445,6 +657,9 @@ const EVENT_PAYLOAD_RULES: Readonly<
     enumField("kind", "decisionKind"),
     text("question"),
     count("optionCount"),
+    text("decisionId", true),
+    refs("optionIds", true),
+    refs("reasonCodes", true),
   ],
   DecisionCompleted: [
     text("decisionId"),
@@ -453,6 +668,30 @@ const EVENT_PAYLOAD_RULES: Readonly<
     enumField("decidedBy", "decidedBy"),
     text("selectedOptionId", true),
     count("latencyMs", true),
+    enumField("answeredBy", "answerSource", true),
+    text("providerId", true),
+    text("modelId", true),
+    text("reasonCode", true),
+    enumField("confidence", "unit", true),
+    refs("ranking", true),
+    enumField("fallbackReason", "fallbackReason", true),
+    { name: "usage", kind: "usage", optional: true },
+    flag("usageReported", true),
+    count("costMicros", true),
+    enumField("executionSource", "providerExecutionSource", true),
+  ],
+  DecisionFailed: [
+    text("decisionId"),
+    enumField("kind", "decisionKind"),
+    text("providerId"),
+    enumField("failureKind", "decisionFailureKind"),
+    count("attempts"),
+  ],
+  DecisionFallbackUsed: [
+    text("decisionId"),
+    enumField("kind", "decisionKind"),
+    enumField("reason", "fallbackReason"),
+    text("selectedOptionId", true),
   ],
   LLMRequestStarted: [
     text("providerId"),
@@ -480,6 +719,7 @@ const EVENT_PAYLOAD_RULES: Readonly<
     count("attempts"),
     flag("retryable"),
     count("statusCode", true),
+    enumField("contentPresence", "contentPresence", true),
     count("latencyMs", true),
   ],
   ToolCallStarted: [text("toolId"), enumField("operation", "operation", true)],
@@ -518,10 +758,98 @@ const EVENT_PAYLOAD_RULES: Readonly<
     enumField("riskLevel", "risk"),
     enumField("operation", "operation", true),
   ],
+  CapabilitiesDeclared: [
+    text("policyId"),
+    count("policyVersion"),
+    refs("capabilities"),
+  ],
+  CapabilityCheckRequested: [
+    text("checkId"),
+    text("capability"),
+    enumField("operation", "operation"),
+    text("targetKind"),
+    text("target"),
+  ],
+  CapabilityCheckCompleted: [
+    text("checkId"),
+    text("capability"),
+    enumField("decision", "capabilityDecision"),
+    enumField("reasonCode", "reasonCode"),
+    flag("requiresApproval"),
+    enumField("riskLevel", "risk"),
+    text("approvalRequestId", true),
+  ],
+  OperationStarted: [
+    text("operationId"),
+    text("capability"),
+    enumField("operation", "operation"),
+    text("targetKind"),
+    text("target"),
+  ],
+  OperationCompleted: [
+    text("operationId"),
+    flag("ok"),
+    count("durationMs"),
+    count("resultSize", true),
+    flag("timedOut", true),
+  ],
+  OperationFailed: [
+    text("operationId"),
+    text("capability"),
+    enumField("reasonCode", "reasonCode"),
+  ],
+  OperationDenied: [
+    text("capability"),
+    enumField("operation", "operation"),
+    text("targetKind"),
+    text("target"),
+    enumField("reasonCode", "reasonCode"),
+  ],
+  SandboxViolation: [
+    text("capability"),
+    enumField("operation", "operation"),
+    text("targetKind"),
+    text("target"),
+    enumField("reasonCode", "reasonCode"),
+  ],
+  OrchestrationPlanned: [
+    text("planId"),
+    text("strategy"),
+    text("reasonCode"),
+    count("stepCount"),
+    refs("modelIds"),
+    refs("providerIds"),
+    flag("parallel"),
+    flag("decomposed"),
+    text("routingMode"),
+    enumField("riskLevel", "risk"),
+    count("maxModelCalls"),
+    refs("candidateModelIds"),
+    refs("rejectedModelIds"),
+    flag("priced"),
+    count("unpricedSteps"),
+    count("estimatedReferenceCostMicros", true),
+    text("contextSelectionId", true),
+    text("selectionReasonCode", true),
+  ],
 };
 
 /** Schema guard: a selection's ref lists are bounded, so the log cannot balloon. */
 export const MAX_RECORDED_SELECTION_REFS = 1_024;
+
+/**
+ * The three answers a capability check can give.
+ *
+ * `approval-required` is not a fourth kind of "allowed": it means the operation has
+ * not happened, and will not until a human grant exists for this exact scope.
+ */
+export const CAPABILITY_CHECK_DECISIONS = [
+  "allowed",
+  "denied",
+  "approval-required",
+] as const;
+
+export type CapabilityDecision = (typeof CAPABILITY_CHECK_DECISIONS)[number];
 
 export const CONTEXT_REF_BASES = ["size", "content"] as const;
 
@@ -689,6 +1017,30 @@ function validatePayload(type: EventType, payload: unknown): void {
         break;
       case "selectionExclusions":
         validateSelectionExclusions(value, field);
+        break;
+      case "reasonCode":
+        assertOneOf(value, POLICY_REASON_CODES, field);
+        break;
+      case "capabilityDecision":
+        assertOneOf(value, CAPABILITY_CHECK_DECISIONS, field);
+        break;
+      case "fallbackReason":
+        assertOneOf(value, DECISION_FALLBACK_REASONS, field);
+        break;
+      case "answerSource":
+        assertOneOf(value, DECISION_ANSWER_SOURCES, field);
+        break;
+      case "contentPresence":
+        assertOneOf(value, LLM_CONTENT_PRESENCE, field);
+        break;
+      case "providerExecutionSource":
+        assertOneOf(value, DECISION_PROVIDER_EXECUTION_SOURCES, field);
+        break;
+      case "decisionFailureKind":
+        assertOneOf(value, DECISION_FAILURE_KINDS, field);
+        break;
+      case "unit":
+        assertUnitInterval(value, field);
         break;
     }
   }

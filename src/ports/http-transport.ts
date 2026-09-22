@@ -45,10 +45,19 @@ export function isHttpTransportError(
 }
 export interface HttpRequest {
   readonly url: string;
-  readonly method: "POST";
+  /**
+   * `POST` for provider chat completions; `GET` is what a read-only operation
+   * needs. Both are sent as-is, and a body is only attached to a `POST`.
+   */
+  readonly method: "GET" | "POST";
   readonly headers: Readonly<Record<string, string>>;
-  /** Already-serialized body. The transport never inspects it. */
-  readonly body: string;
+  /**
+   * Already-serialized body. The transport never inspects it.
+   *
+   * Absent for a `GET`: a request that carries no entity must not send one, and
+   * `fetch` rejects a body on a bodyless method outright.
+   */
+  readonly body?: string;
   readonly timeoutMs: number;
   readonly correlationId: string;
 }

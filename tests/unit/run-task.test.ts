@@ -99,8 +99,30 @@ describe("run: the recorded lifecycle", () => {
       "SessionStarted",
       "ContextSelectionStarted",
       "ContextSelected",
+      // The attempt's capability envelope, then the one operation it performs.
+      // Enforcement events are written when the operation is *requested*, which for
+      // a runner that reports its steps afterwards means they land before the model
+      // turns they surround; `occurredAt` is the wall-clock order (see the trace
+      // section of README).
+      "CapabilitiesDeclared",
+      // Two bounded questions before the attempt does any work: the route it takes
+      // and the tool it uses. Both are answered by code here, and both are recorded,
+      // because "why did this task run the way it did" has to be answerable from the
+      // log rather than inferred.
+      "DecisionRequested",
+      "DecisionCompleted",
+      "DecisionRequested",
+      "DecisionCompleted",
+      "CapabilityCheckRequested",
+      "CapabilityCheckCompleted",
+      "OperationStarted",
+      "OperationCompleted",
       "LLMRequestStarted",
       "LLMRequestCompleted",
+      // The per-step risk assessment, then the policy effect it fed — the same
+      // evaluation the platform performed before a decision layer existed.
+      "DecisionRequested",
+      "DecisionCompleted",
       "DecisionRequested",
       "DecisionCompleted",
       "ToolCallStarted",
@@ -108,6 +130,12 @@ describe("run: the recorded lifecycle", () => {
       "TestStarted",
       "TestCompleted",
       "TaskStatusChanged",
+      // Closings questions: does the evidence suggest completion, and should a human
+      // review the outcome. Neither can change the task state on its own.
+      "DecisionRequested",
+      "DecisionCompleted",
+      "DecisionRequested",
+      "DecisionCompleted",
       "SessionEnded",
       "TaskStatusChanged",
     ]);
@@ -353,6 +381,11 @@ describe("run: gates", () => {
       clock: createManualClock("2026-09-20T10:00:00.000Z"),
       providerId: subject.runtime.providerId,
       modelId: subject.runtime.modelId,
+      // The real enforcement boundary, so a step that is denied by the risk policy
+      // is still evaluated by the capability layer exactly as it is in production.
+      operations: subject.runtime.operations,
+      recorder: subject.runtime.recorder,
+      decisionLayer: subject.runtime.decisionLayer,
     });
 
     const result = await runTask.run(stored);
@@ -396,6 +429,11 @@ describe("run: gates", () => {
       clock: createManualClock("2026-09-20T10:00:00.000Z"),
       providerId: subject.runtime.providerId,
       modelId: subject.runtime.modelId,
+      // The real enforcement boundary, so a step that is denied by the risk policy
+      // is still evaluated by the capability layer exactly as it is in production.
+      operations: subject.runtime.operations,
+      recorder: subject.runtime.recorder,
+      decisionLayer: subject.runtime.decisionLayer,
     });
 
     const result = await runTask.run(stored);
@@ -464,6 +502,11 @@ describe("run: gates", () => {
       clock: createManualClock("2026-09-20T10:00:00.000Z"),
       providerId: subject.runtime.providerId,
       modelId: subject.runtime.modelId,
+      // The real enforcement boundary, so a step that is denied by the risk policy
+      // is still evaluated by the capability layer exactly as it is in production.
+      operations: subject.runtime.operations,
+      recorder: subject.runtime.recorder,
+      decisionLayer: subject.runtime.decisionLayer,
     });
 
     const result = await runTask.run(stored);

@@ -2,7 +2,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { LlmConfig } from "../../src/adapters/config/project-config.js";
+import type {
+  FrontierConfig,
+  LlmConfig,
+} from "../../src/adapters/config/project-config.js";
+import type { AccessPolicy } from "../../src/policy/access-policy.js";
 import { type Clock, createFixedClock } from "../../src/core/clock.js";
 import {
   initializeProject,
@@ -16,6 +20,9 @@ import type { AppendLock } from "../../src/ports/append-lock.js";
 import type { Environment } from "../../src/ports/environment.js";
 import type { HttpTransport } from "../../src/ports/http-transport.js";
 import type { LlmProvider } from "../../src/ports/llm-provider.js";
+import type { ModelRate } from "../../src/observability/cost.js";
+import type { FrontierExecutor } from "../../src/ports/frontier.js";
+import type { DecisionProvider } from "../../src/decisions/provider.js";
 import type { Sleep } from "../../src/ports/sleep.js";
 import { createRecordingSleep } from "../../src/ports/sleep.js";
 
@@ -43,11 +50,45 @@ export interface TestProjectOptions {
   readonly llm?: LlmConfig;
   /** Overrides the configured provider, for provider-level tests. */
   readonly provider?: LlmProvider;
+  /**
+   * Installs a decision layer for the test, exactly as `provider` installs an LLM
+   * provider. Absent means no decision engine, which is the platform's default and
+   * must keep working.
+   */
+  readonly decisionProvider?: DecisionProvider;
   readonly lock?: AppendLock;
   readonly sleep?: Sleep;
   readonly environment?: Environment;
+  /**
+   * The enforcement policy, written at `ai init` time and opened with.
+   *
+   * Absent means the policy `ai init` writes on its own: read-only within the
+   * workspace. A test that needs a real provider to reach a fixture host therefore
+   * has to grant it explicitly here — exactly as an operator would (ADR-050).
+   */
+  readonly policy?: AccessPolicy;
   /** Injected so a real provider adapter can be driven without a network. */
   readonly transport?: HttpTransport;
+  /**
+   * Frontier configuration written at `ai init` time.
+   *
+   * Absent means the documented default: the built-in model catalog with routing
+   * disabled, which is what keeps every pre-Phase-H test on the old behaviour.
+   */
+  readonly frontierConfig?: FrontierConfig;
+  /**
+   * Provider adapters the frontier executes through, when a test wants to drive
+   * multi-model execution without a transport. The registry and the plan build still
+   * run for real.
+   */
+  readonly frontierProviders?: ReadonlyMap<string, LlmProvider>;
+  /** Pricing table written at `ai init` time. Absent means the offline rates. */
+  readonly modelRates?: readonly ModelRate[];
+  /**
+   * Scripts the frontier executor itself, so multi-model execution can be tested
+   * with no transport at all. The registry, planning and decisions stay real.
+   */
+  readonly frontier?: FrontierExecutor;
 }
 
 export async function createTestProject(
@@ -61,6 +102,13 @@ export async function createTestProject(
     slug: "test-project",
     clock,
     ...(options?.llm === undefined ? {} : { llm: options.llm }),
+    ...(options?.policy === undefined ? {} : { policy: options.policy }),
+    ...(options?.frontierConfig === undefined
+      ? {}
+      : { frontier: options.frontierConfig }),
+    ...(options?.modelRates === undefined
+      ? {}
+      : { modelRates: options.modelRates }),
   });
   const runtime = await openRuntime({
     projectRoot: root,
@@ -69,14 +117,22 @@ export async function createTestProject(
       ? {}
       : { includeRetry: options.includeRetry }),
     ...(options?.provider === undefined ? {} : { provider: options.provider }),
+    ...(options?.decisionProvider === undefined
+      ? {}
+      : { decisionProvider: options.decisionProvider }),
     ...(options?.lock === undefined ? {} : { lock: options.lock }),
     ...(options?.sleep === undefined ? {} : { sleep: options.sleep }),
     ...(options?.environment === undefined
       ? {}
       : { environment: options.environment }),
+    ...(options?.policy === undefined ? {} : { accessPolicy: options.policy }),
     ...(options?.transport === undefined
       ? {}
       : { transport: options.transport }),
+    ...(options?.frontierProviders === undefined
+      ? {}
+      : { frontierProviders: options.frontierProviders }),
+    ...(options?.frontier === undefined ? {} : { frontier: options.frontier }),
   });
   return {
     root,

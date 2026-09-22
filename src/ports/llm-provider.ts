@@ -60,6 +60,28 @@ export const LLM_FAILURE_KINDS = [
 
 export type LlmFailureKind = (typeof LLM_FAILURE_KINDS)[number];
 
+/**
+ * What a 2xx response actually carried, as structure only — never its text.
+ *
+ * Recorded alongside `malformed-response` so an operator can tell an empty
+ * completion from a reasoning-only one without anyone logging content (ADR-035).
+ * A closed set, so the log stays queryable.
+ */
+export const LLM_CONTENT_PRESENCE = [
+  /** The payload had no `choices` array, or an empty one. */
+  "no-choices",
+  /** A choice existed, but its content was empty or whitespace. */
+  "empty-content",
+  /** The model spent its response on reasoning and produced no content. */
+  "reasoning-only",
+  /** Non-empty content was present (also the successful shape's state). */
+  "usable-content",
+  /** The body was not JSON, or had none of the expected shape. */
+  "unparseable",
+] as const;
+
+export type LlmContentPresence = (typeof LLM_CONTENT_PRESENCE)[number];
+
 export interface LlmFailureDetails {
   readonly failureKind: LlmFailureKind;
   readonly providerId: string;
@@ -67,6 +89,8 @@ export interface LlmFailureDetails {
   readonly attempts: number;
   readonly retryable: boolean;
   readonly statusCode?: number;
+  /** What a 2xx body actually carried, when the failure is `malformed-response`. */
+  readonly contentPresence?: LlmContentPresence;
   /** Provider-requested delay, honoured by the retry decorator within a cap. */
   readonly retryAfterMs?: number;
 }
@@ -85,6 +109,7 @@ export class LlmProviderError extends DomainError {
   readonly attempts: number;
   readonly retryable: boolean;
   readonly statusCode?: number;
+  readonly contentPresence?: LlmContentPresence;
   readonly retryAfterMs?: number;
 
   constructor(details: LlmFailureDetails, message: string) {
@@ -103,6 +128,9 @@ export class LlmProviderError extends DomainError {
     this.retryable = details.retryable;
     if (details.statusCode !== undefined) {
       this.statusCode = details.statusCode;
+    }
+    if (details.contentPresence !== undefined) {
+      this.contentPresence = details.contentPresence;
     }
     if (details.retryAfterMs !== undefined) {
       this.retryAfterMs = details.retryAfterMs;

@@ -1,6 +1,6 @@
 import type { Clock } from "../../core/clock.js";
 import { durationMsFrom, toIsoString } from "../../core/clock.js";
-import { DomainError } from "../../core/errors.js";
+import { DomainError, hasDomainErrorCode } from "../../core/errors.js";
 import { assertNonEmptyString } from "../../core/validation.js";
 import type { AIUsage } from "../../observability/usage.js";
 import { assertValidUsage } from "../../observability/usage.js";
@@ -11,6 +11,7 @@ import {
   isHttpTransportError,
 } from "../../ports/http-transport.js";
 import {
+  type LlmContentPresence,
   type LlmFailureKind,
   type LlmFinishReason,
   type LlmProvider,
@@ -138,7 +139,9 @@ interface ChatCompletionPayload {
 /** Extracts text from the two `content` shapes Chat Completions APIs return. */
 function extractContent(content: unknown): string | undefined {
   if (typeof content === "string") {
-    return content;
+    // An empty string is "no content", not "content that is empty": callers
+    // distinguish absence of a completion from one with text in it.
+    return content.length === 0 ? undefined : content;
   }
   if (Array.isArray(content)) {
     const parts: string[] = [];
@@ -152,9 +155,42 @@ function extractContent(content: unknown): string | undefined {
         parts.push((part as { text: string }).text);
       }
     }
-    return parts.length === 0 ? undefined : parts.join("");
+    const joined = parts.join("");
+    return joined.length === 0 ? undefined : joined;
   }
   return undefined;
+}
+
+/**
+ * Reports, from shape alone, what a 2xx body carried.
+ *
+ * Never inspects text: the categories are structural (ADR-035), so the field is
+ * safe to persist while every string in the body stays unpersisted.
+ */
+function classifyContentPresence(payload: {
+  readonly choices?: unknown;
+  readonly message?: unknown;
+}): LlmContentPresence {
+  if (!Array.isArray(payload.choices) || payload.choices.length === 0) {
+    return "no-choices";
+  }
+  if (
+    typeof payload.message !== "object" ||
+    payload.message === null
+  ) {
+    return "reasoning-only";
+  }
+  const content = (payload.message as Record<string, unknown>)["content"];
+  if (extractContent(content) !== undefined) {
+    return "usable-content";
+  }
+  // A content field that exists but holds nothing ("", or an empty parts
+  // array) is an empty completion; no content field at all is the reasoning
+  // model's signature. The distinction is structural, not textual.
+  if (typeof content === "string" || Array.isArray(content)) {
+    return "empty-content";
+  }
+  return "reasoning-only";
 }
 
 export function createOpenAiCompatibleProvider(
@@ -175,7 +211,11 @@ export function createOpenAiCompatibleProvider(
   function fail(
     failureKind: LlmFailureKind,
     modelId: string,
-    details: { statusCode?: number; retryAfterMs?: number } = {},
+    details: {
+      statusCode?: number;
+      contentPresence?: LlmContentPresence;
+      retryAfterMs?: number;
+    } = {},
   ): never {
     throw new LlmProviderError(
       {
@@ -229,7 +269,10 @@ export function createOpenAiCompatibleProvider(
     } catch {
       // A provider that reports cached tokens exceeding input tokens is not a
       // rounding problem; the response does not mean what it claims.
-      fail("malformed-response", modelId, { statusCode: 200 });
+      fail("malformed-response", modelId, {
+        statusCode: 200,
+        contentPresence: "unparseable",
+      });
     }
   }
 
@@ -305,6 +348,12 @@ export function createOpenAiCompatibleProvider(
         if (error instanceof LlmProviderError) {
           throw error;
         }
+        if (hasDomainErrorCode(error, "FORBIDDEN")) {
+          // Policy refused this call before it reached the socket (egress, capability
+          // or approval gate). A refusal is not an unknown transport failure, and it
+          // is never retryable: repeating it asks the same boundary the same question.
+          fail("refused", modelId);
+        }
         // An unrecognised transport error is not assumed to be retryable.
         fail("unknown", modelId);
       }
@@ -323,19 +372,23 @@ export function createOpenAiCompatibleProvider(
           statusCode: response.status,
           ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
         });
-      }
-
-      let parsed: ChatCompletionPayload;
+      }      let parsed: ChatCompletionPayload;
       try {
         parsed = JSON.parse(response.body) as ChatCompletionPayload;
       } catch {
         // The response body is never echoed: it may contain anything.
-        fail("malformed-response", modelId, { statusCode: response.status });
+        fail("malformed-response", modelId, {
+          statusCode: response.status,
+          contentPresence: "unparseable",
+        });
       }
 
       const choices = parsed.choices;
       if (!Array.isArray(choices) || choices.length === 0) {
-        fail("malformed-response", modelId, { statusCode: response.status });
+        fail("malformed-response", modelId, {
+          statusCode: response.status,
+          contentPresence: "no-choices",
+        });
       }
       const choice = choices[0] as Record<string, unknown>;
       const message = choice["message"];
@@ -344,7 +397,13 @@ export function createOpenAiCompatibleProvider(
           ? extractContent((message as Record<string, unknown>)["content"])
           : undefined;
       if (content === undefined) {
-        fail("malformed-response", modelId, { statusCode: response.status });
+        fail("malformed-response", modelId, {
+          statusCode: response.status,
+          contentPresence: classifyContentPresence({
+            choices,
+            message,
+          }),
+        });
       }
 
       const usage = normalizeUsage(parsed.usage, modelId);

@@ -1,8 +1,18 @@
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { DEFAULT_CONTEXT_CONFIG } from "../adapters/config/project-config.js";
+import {
+  DEFAULT_CONTEXT_CONFIG,
+  DEFAULT_TYPESAFE_BASE_URL,
+} from "../adapters/config/project-config.js";
 import { createDisabledChangeProvider } from "../adapters/git/git-change-provider.js";
 import { createFileRepositoryReader } from "../adapters/repository/file-repository-reader.js";
 import { createFileAppendLock } from "../adapters/storage/file-append-lock.js";
@@ -18,6 +28,15 @@ import {
   workspaceId,
 } from "../core/ids.js";
 import { createEvent } from "../observability/events.js";
+import type { DomainEvent } from "../observability/events.js";
+import { type AccessPolicy, hostAllowedBy } from "../policy/access-policy.js";
+import {
+  isWithinRoot,
+  refWithinAnyRoot,
+  resolveRef,
+} from "../policy/path-boundary.js";
+import { urlHost } from "../adapters/sandbox/guarded-network.js";
+import type { OperationRequest } from "../ports/operation.js";
 import { createProject } from "../projects/project.js";
 import { createWorkspace } from "../workspaces/workspace.js";
 import { createDeterministicContextEngine } from "./context-engine.js";
@@ -224,6 +243,7 @@ function checkProvider(
     `"${runtime.providerId}" -> ${host}, model "${llm.modelId}", ` +
     `up to ${llm.maxAttempts ?? "3"} attempt(s)` +
     (llm.timeoutMs === undefined ? "" : `, ${llm.timeoutMs}ms timeout`);
+  const egress = providerEgressNote(llm.baseUrl, runtime.accessPolicy);
   if (!presence.present) {
     return {
       id: "llm-provider",
@@ -235,11 +255,367 @@ function checkProvider(
         `"simulated"`,
     };
   }
+  if (egress !== undefined) {
+    return {
+      id: "llm-provider",
+      title: "LLM provider",
+      status: "warn",
+      detail: `${common}; ${formatCredentialPresence(presence)}; ${egress}`,
+    };
+  }
   return {
     id: "llm-provider",
     title: "LLM provider",
     status: "ok",
     detail: `${common}; ${formatCredentialPresence(presence)}`,
+  };
+}
+
+/**
+ * Whether the platform's own egress may reach the host a provider is configured for.
+ *
+ * Configuring a provider and making it reachable are two separate decisions: the
+ * host must also appear in `policy.network.providerHosts`, and it is checked at the
+ * transport rather than by each adapter (ADR-050). A provider whose host is missing
+ * is constructible, credentialed and *unreachable* — a state worth naming here,
+ * because the alternative is an operator reading `FORBIDDEN` at run time and
+ * wondering which of the two halves is wrong.
+ *
+ * Returns `undefined` when there is nothing to say, which includes an unparseable
+ * URL: a bad URL is a configuration error the provider's own validation already
+ * refuses loudly, and doctor does not duplicate it.
+ */
+function providerEgressNote(
+  url: string,
+  policy: AccessPolicy,
+): string | undefined {
+  const host = urlHost(url);
+  if (host === undefined) {
+    return undefined;
+  }
+  if (hostAllowedBy(policy.network.providerHosts, host) !== undefined) {
+    return undefined;
+  }
+  return (
+    `warning: host "${host}" is not listed in policy.network.providerHosts, so ` +
+    `every request would be refused by the network boundary before it is sent; ` +
+    `add it there to allow provider egress`
+  );
+}
+
+/**
+ * Reports the decision layer, and whether it could actually be used.
+ *
+ * Offline by construction, like every other check here: a decision provider is
+ * *configured*, and its credential is *present* or *absent*. Whether a JEV service
+ * answers correctly is not something a health check can establish without spending
+ * money and sending data, so it does not pretend to.
+ *
+ * A configured provider with no credential is a real failure: every consultation
+ * would fail with `auth`, the deterministic fallback would answer everything, and an
+ * operator would see a working system with a silently dead decision layer. That is
+ * exactly the state this command exists to surface.
+ */
+function checkDecisionLayer(
+  runtime: Awaited<ReturnType<typeof openRuntime>>,
+  environment: Environment,
+): DoctorCheck {
+  const config = runtime.decision;
+  const info = runtime.decisionEngine;
+  const budget =
+    `${config.maxDecisionsPerTask} consultation(s) per task, ` +
+    `${config.maxRetriesPerTask} attempt-level retr(ies)`;
+  if (!info.configured) {
+    return {
+      id: "decision-layer",
+      title: "Decision layer",
+      status: "ok",
+      detail:
+        `disabled (${config.provider}); bounded questions are answered by code and ` +
+        `recorded as such, and no decision request is sent (${budget})`,
+    };
+  }
+
+  const kinds = info.kinds ?? [];
+  const common =
+    `"${info.providerId ?? "unknown"}" (${info.providerFamily ?? "unknown"}) ` +
+    `serving ${kinds.length === 0 ? "no" : kinds.join(", ")} question kind(s); ` +
+    `${info.deterministic === true ? "declared deterministic" : "not declared deterministic"}; ${budget}`;
+
+  if (config.provider === "disabled") {
+    // An injected provider with a disabled configuration is a test or an embedding;
+    // there is no configured credential to check and no endpoint to describe.
+    return {
+      id: "decision-layer",
+      title: "Decision layer",
+      status: "ok",
+      detail: `${common}; injected provider (configuration says disabled)`,
+    };
+  }
+
+  const presence = describeCredential(environment, config.credentialEnvVar);
+  // TypeSafe's own SDK defaults both of these, so an operator only writes what they
+  // mean to change. The doctor still names the host that would be reached, because
+  // egress policy is checked against a host.
+  const baseUrl =
+    config.baseUrl ??
+    (config.provider === "typesafe" ? DEFAULT_TYPESAFE_BASE_URL : undefined);
+  const host = (() => {
+    if (baseUrl === undefined) {
+      return "unparseable base URL";
+    }
+    try {
+      return new URL(baseUrl).host;
+    } catch {
+      return "unparseable base URL";
+    }
+  })();
+  const declaredModel =
+    config.provider === "typesafe" ? config.defaultModel : config.modelId;
+  const transport =
+    `-> ${host}` +
+    (config.timeoutMs === undefined ? "" : `, ${config.timeoutMs}ms timeout`) +
+    (declaredModel === undefined ? "" : `, model "${declaredModel}"`);
+  if (!presence.present) {
+    return {
+      id: "decision-layer",
+      title: "Decision layer",
+      status: "fail",
+      detail:
+        `${common}; ${transport}; the credential variable ${presence.name} is not set, ` +
+        `so every consultation would fail with \`auth\` and the deterministic fallback ` +
+        `would answer. Export it, or set \`decision.provider\` back to "disabled"`,
+    };
+  }
+  const egress =
+    baseUrl === undefined
+      ? undefined
+      : providerEgressNote(baseUrl, runtime.accessPolicy);
+  if (egress !== undefined) {
+    return {
+      id: "decision-layer",
+      title: "Decision layer",
+      status: "warn",
+      detail:
+        `${common}; ${transport}; ${formatCredentialPresence(presence)}; ${egress}` +
+        ` (the deterministic fallback would answer every question)`,
+    };
+  }
+  return {
+    id: "decision-layer",
+    title: "Decision layer",
+    status: "ok",
+    detail: `${common}; ${transport}; ${formatCredentialPresence(presence)}`,
+  };
+}
+
+/**
+ * Reports the model catalog and the frontier routing policy.
+ *
+ * Two different questions, answered separately, because conflating them is how a
+ * project ends up believing it has a working multi-model path when it has a model
+ * list and no way to reach it:
+ *
+ * - **Knowledge** — how many models are registered, and what they can do.
+ * - **Reachability** — for each provider, whether the credential variable is set and
+ *   whether policy allows its host. Neither answer reveals a credential value, and
+ *   neither makes a network request: the default doctor stays offline.
+ */
+function checkFrontier(
+  runtime: Awaited<ReturnType<typeof openRuntime>>,
+  environment: Environment,
+): DoctorCheck {
+  const config = runtime.frontierConfig;
+  const models = config.models;
+  const enabledModels = models.filter((model) => model.enabled);
+  const capabilities = [
+    ...new Set(models.flatMap((model) => model.capabilities)),
+  ].sort();
+  const catalog =
+    `${models.length} model(s) registered, ${enabledModels.length} enabled, ` +
+    `${config.providers.length} provider(s) configured; routing "${config.routing.mode}", ` +
+    `at most ${config.routing.maxModelCalls} call(s) and ${config.routing.maxRetriesPerStep} retr(ies) per step, ` +
+    `decomposition ${config.routing.allowDecomposition ? "allowed" : "off"}, parallel ${config.routing.allowParallel ? "allowed" : "off"}`;
+  if (models.length === 0) {
+    return {
+      id: "frontier",
+      title: "Frontier models",
+      status: "warn",
+      detail:
+        `${catalog}; no model is registered, so no orchestration plan can be built ` +
+        `(add entries to frontier.models to describe your models)`,
+    };
+  }
+
+  if (!config.enabled) {
+    return {
+      id: "frontier",
+      title: "Frontier models",
+      status: "ok",
+      detail:
+        `${catalog}; routing is disabled, so nothing is called and ` +
+        `\`ai task orchestrate\` will refuse; capabilities on record: ${capabilities.join(", ")}`,
+    };
+  }
+
+  const problems: string[] = [];
+  const warnings: string[] = [];
+  for (const provider of config.providers) {
+    const presence = describeCredential(environment, provider.credentialEnvVar);
+    const served = models.filter(
+      (model) => model.providerId === provider.id && model.enabled,
+    );
+    if (served.length === 0) {
+      continue;
+    }
+    if (!presence.present) {
+      problems.push(
+        `provider "${provider.id}": ${presence.name} is not set, so its ` +
+          `${served.length} enabled model(s) would fail with \`auth\``,
+      );
+      continue;
+    }
+    const egress = providerEgressNote(provider.baseUrl, runtime.accessPolicy);
+    if (egress !== undefined) {
+      warnings.push(`provider "${provider.id}": ${egress}`);
+    }
+  }
+
+  const detail =
+    `${catalog}; enabled models: ${enabledModels.map((model) => model.modelId).join(", ")}; ` +
+    `capabilities: ${capabilities.join(", ")}` +
+    (problems.length === 0 ? "" : `; ${problems.join("; ")}`) +
+    (warnings.length === 0 ? "" : `; ${warnings.join("; ")}`);
+
+  if (problems.length > 0) {
+    return {
+      id: "frontier",
+      title: "Frontier models",
+      status: "fail",
+      detail,
+    };
+  }
+  return {
+    id: "frontier",
+    title: "Frontier models",
+    status: warnings.length > 0 ? "warn" : "ok",
+    detail,
+  };
+}
+
+/**
+ * Checks the shape of the plans this project has already recorded.
+ *
+ * A plan event that names a step count it does not have, or a candidate list that
+ * does not contain the models it says will run, is a plan nobody can audit after the
+ * fact. Checked against real recorded events, and nothing is written.
+ */
+function checkOrchestrationAudit(events: readonly DomainEvent[]): DoctorCheck {
+  const problems: string[] = [];
+  let plans = 0;
+  for (const event of events) {
+    if (event.type !== "OrchestrationPlanned") {
+      continue;
+    }
+    plans += 1;
+    const { stepCount, modelIds, strategy, maxModelCalls } = event.payload;
+    if (strategy !== "deterministic" && modelIds.length > maxModelCalls) {
+      problems.push(
+        `plan "${event.payload.planId}" would use ${modelIds.length} model(s) above its ${maxModelCalls} call cap`,
+      );
+    }
+    if (strategy === "deterministic" && stepCount !== 0) {
+      problems.push(
+        `plan "${event.payload.planId}" is deterministic but declares ${stepCount} step(s)`,
+      );
+    }
+  }
+  if (plans === 0) {
+    return {
+      id: "orchestration-audit",
+      title: "Orchestration audit",
+      status: "ok",
+      detail:
+        "no orchestration plan has been recorded in this workspace yet; nothing to check",
+    };
+  }
+  return {
+    id: "orchestration-audit",
+    title: "Orchestration audit",
+    status: problems.length === 0 ? "ok" : "fail",
+    detail:
+      problems.length === 0
+        ? `${plans} recorded plan(s) are internally consistent (step counts, call caps, candidate lists)`
+        : `${plans} recorded plan(s); problems: ${problems.join("; ")}`,
+  };
+}
+
+/**
+ * Checks the shape of the decisions this project has already recorded.
+ *
+ * These are the invariants that make the decision log usable after the fact, checked
+ * against real recorded events rather than against a constructed example: a decision
+ * that cannot be tied to its question, or a fallback that does not say why it was
+ * used, is a decision nobody can audit. Nothing is written by this check.
+ */
+function checkDecisionAudit(events: readonly DomainEvent[]): DoctorCheck {
+  const problems: string[] = [];
+  let decisions = 0;
+  let fallbacks = 0;
+  let failures = 0;
+  for (const event of events) {
+    if (event.type === "DecisionFailed") {
+      failures += 1;
+      if (event.payload.providerId.length === 0) {
+        problems.push(
+          `DecisionFailed event "${event.id}" does not name a provider`,
+        );
+      }
+      continue;
+    }
+    if (event.type !== "DecisionCompleted") {
+      continue;
+    }
+    decisions += 1;
+    if (
+      event.payload.answeredBy === "fallback" &&
+      event.payload.fallbackReason === undefined
+    ) {
+      problems.push(
+        `decision "${event.payload.decisionId}" used a fallback without recording why`,
+      );
+    }
+    if (event.payload.answeredBy === "fallback") {
+      fallbacks += 1;
+    }
+    if (
+      event.payload.answeredBy === "provider" &&
+      event.payload.providerId === undefined
+    ) {
+      problems.push(
+        `decision "${event.payload.decisionId}" was answered by a provider that is not named`,
+      );
+    }
+  }
+  const detail =
+    `${decisions} decision(s) recorded, ${fallbacks} answered by the deterministic ` +
+    `fallback, ${failures} failed consultation(s)`;
+  if (problems.length > 0) {
+    return {
+      id: "decision-audit",
+      title: "Decision audit",
+      status: "fail",
+      detail: `${detail}; ${problems.join("; ")}`,
+    };
+  }
+  return {
+    id: "decision-audit",
+    title: "Decision audit",
+    status: "ok",
+    detail:
+      decisions === 0
+        ? `${detail}; the decision path has not been exercised in this scope yet`
+        : detail,
   };
 }
 
@@ -645,6 +1021,184 @@ async function checkContextEngine(clock: Clock): Promise<DoctorCheck> {
   }
 }
 
+/**
+ * Offline verification of the enforcement boundary.
+ *
+ * Everything here is measured rather than asserted, and none of it performs an
+ * operation: `admit` is the boundary's own read-only pre-check, so the probes below
+ * prove that refusal works without writing a file or starting a process. Four kinds
+ * of problem are looked for:
+ *
+ * - a configured root that escapes the workspace, in text or through a symlink;
+ * - refusals that no longer happen: traversal, absolute paths, credential-shaped
+ *   paths and runtime state are probed directly, and any one of them being admitted
+ *   is a hard failure rather than a warning;
+ * - a policy that is self-contradictory, e.g. reads allowed with no readable root;
+ * - a capability envelope that is empty (nothing can be done) or unusually wide
+ *   (writes or process execution without approval), reported as a warning because
+ *   it may be exactly what the operator intended.
+ *
+ * What this check deliberately cannot say is that the boundary is strong. It is an
+ * in-process boundary, not a container, a VM or a kernel-level one, and the detail
+ * line says so rather than implying more (ADR-045).
+ */
+async function checkEnforcement(
+  runtime: Awaited<ReturnType<typeof openRuntime>>,
+  platform: string,
+): Promise<DoctorCheck> {
+  const policy = runtime.accessPolicy;
+  const boundary = runtime.sandbox;
+  const envelope = runtime.operations.envelope;
+  const problems: string[] = [];
+  const notes: string[] = [];
+
+  const roots: readonly { readonly dir: string; readonly ref: string }[] = [
+    ...policy.filesystem.readableRoots.map((ref) => ({ dir: "readable", ref })),
+    ...policy.filesystem.writableRoots.map((ref) => ({ dir: "writable", ref })),
+  ];
+  let realWorkspace: string | undefined;
+  try {
+    realWorkspace = await realpath(runtime.workspace.rootPath);
+  } catch {
+    // A workspace that cannot be resolved is reported by the layout and context
+    // checks; there is nothing to compare roots against here.
+    realWorkspace = undefined;
+  }
+  for (const { dir, ref } of roots) {
+    let absolute: string | undefined;
+    try {
+      absolute = resolveRef(runtime.workspace.rootPath, ref);
+    } catch {
+      problems.push(
+        `the ${dir} root "${ref}" is not a workspace-relative reference`,
+      );
+      continue;
+    }
+    if (!isWithinRoot(runtime.workspace.rootPath, absolute, platform)) {
+      problems.push(`the ${dir} root "${ref}" resolves outside the workspace`);
+      continue;
+    }
+    let realRootPath: string | undefined;
+    try {
+      realRootPath = await realpath(absolute);
+    } catch {
+      // Not existing yet is normal for a writable root.
+      realRootPath = undefined;
+    }
+    if (
+      realRootPath !== undefined &&
+      realWorkspace !== undefined &&
+      !isWithinRoot(realWorkspace, realRootPath, platform)
+    ) {
+      problems.push(
+        `the ${dir} root "${ref}" is a link that leaves the workspace`,
+      );
+    }
+  }
+
+  const probes: readonly {
+    readonly label: string;
+    readonly request: OperationRequest;
+    readonly expect: readonly string[];
+  }[] = [
+    {
+      label: "parent-directory traversal",
+      request: { kind: "fs.read", ref: "../outside.txt" },
+      expect: ["TARGET_REFUSED"],
+    },
+    {
+      label: "absolute path",
+      request: { kind: "fs.read", ref: "/etc/passwd" },
+      expect: ["TARGET_REFUSED"],
+    },
+    {
+      label: "credential-shaped path",
+      request: { kind: "fs.read", ref: ".env" },
+      expect: ["SECRET_PATH_DENIED"],
+    },
+    {
+      label: "runtime-state write",
+      request: { kind: "fs.write", ref: ".ai/project.json", content: "" },
+      expect: ["RUNTIME_STATE_DENIED"],
+    },
+  ];
+  for (const probe of probes) {
+    const refusal = await boundary.admit(probe.request);
+    if (refusal === undefined) {
+      problems.push(`the boundary admitted ${probe.label}`);
+      continue;
+    }
+    if (!probe.expect.includes(refusal.reasonCode)) {
+      problems.push(
+        `${probe.label} was refused as "${refusal.reasonCode}", not as ${probe.expect.join(" or ")}`,
+      );
+    }
+  }
+
+  // The normal path, checked only when policy says it should work: a boundary that
+  // contradicts its own policy is worse than one that is merely restrictive.
+  if (
+    envelope.includes("filesystem.read") &&
+    refWithinAnyRoot(".", policy.filesystem.readableRoots) !== undefined
+  ) {
+    const admitted = await boundary.admit({ kind: "fs.list", ref: "." });
+    if (admitted !== undefined) {
+      problems.push(
+        `reading the workspace root is permitted by policy but refused by the boundary (${admitted.reasonCode})`,
+      );
+    }
+  }
+
+  if (envelope.length === 0) {
+    notes.push(
+      "the capability envelope is empty: this workspace can plan and record, but no operation can be performed",
+    );
+  }
+  for (const capability of ["filesystem.write", "process.execute"] as const) {
+    if (
+      envelope.includes(capability) &&
+      !policy.capabilities.requireApproval.includes(capability)
+    ) {
+      notes.push(`${capability} is allowed without human approval`);
+    }
+  }
+  if (policy.network.enabled) {
+    notes.push(
+      `network access is enabled for ${policy.network.allowedHosts.length} host(s) ` +
+        `(${policy.network.providerHosts.length} provider host(s) kept separate)`,
+    );
+  }
+  if (policy.process.allowedCommands.length > 0) {
+    notes.push(
+      `${policy.process.allowedCommands.length} command(s) may be executed with ` +
+        `${policy.process.environmentAllowlist.length} environment variable(s) forwarded`,
+    );
+  }
+
+  const detail =
+    `${boundary.id} (${runtime.operations.guarantee}, not a container or VM); ` +
+    `policy ${policy.id} v${policy.version}; ` +
+    `capabilities: ${envelope.length === 0 ? "none" : envelope.join(", ")}; ` +
+    `refusal probes: ${probes.length} checked`;
+  if (problems.length > 0) {
+    return {
+      id: "enforcement",
+      title: "Enforcement boundary",
+      status: "fail",
+      detail: `${detail}; ${problems.join("; ")}`,
+    };
+  }
+  return {
+    id: "enforcement",
+    title: "Enforcement boundary",
+    status: notes.length === 0 ? "ok" : "warn",
+    detail:
+      notes.length === 0
+        ? `${detail}; no writable root, no command and no host is configured`
+        : `${detail}; ${notes.join("; ")}`,
+  };
+}
+
 export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [
     checkRuntime(deps.runtimeVersion, deps.platform),
@@ -731,6 +1285,8 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
       status: "ok",
       detail: `${eventCount} event(s) readable in workspace "${runtime.workspace.id}"`,
     });
+    checks.push(checkDecisionAudit(events));
+    checks.push(checkOrchestrationAudit(events));
   } catch (error) {
     checks.push({
       id: "event-log",
@@ -767,6 +1323,13 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
     });
   }
 
+  checks.push(
+    checkDecisionLayer(runtime, deps.environment ?? createProcessEnvironment()),
+  );
+  checks.push(
+    checkFrontier(runtime, deps.environment ?? createProcessEnvironment()),
+  );
+  checks.push(await checkEnforcement(runtime, deps.platform));
   checks.push(checkContextConfig(runtime));
   checks.push(await checkContextRepository(runtime));
   checks.push(await checkContextEngine(deps.clock));

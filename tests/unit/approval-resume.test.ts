@@ -90,6 +90,9 @@ function runWithPolicy(subject: TestProject, policy: Policy): RunTask {
     clock: createManualClock("2026-09-20T10:00:00.000Z"),
     providerId: subject.runtime.providerId,
     modelId: subject.runtime.modelId,
+    operations: subject.runtime.operations,
+    recorder: subject.runtime.recorder,
+    decisionLayer: subject.runtime.decisionLayer,
   });
 }
 
@@ -422,6 +425,9 @@ describe("provider failures are trace facts", () => {
       clock: createManualClock("2026-09-20T10:00:00.000Z"),
       providerId: provider.id,
       modelId: provider.models[0],
+      operations: subject.runtime.operations,
+      recorder: subject.runtime.recorder,
+      decisionLayer: subject.runtime.decisionLayer,
     });
 
     const result = await runTask.run(stored);

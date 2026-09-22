@@ -30,6 +30,11 @@ export const COMMANDS: readonly {
     summary: "run one bounded attempt and record every step",
   },
   {
+    name: "ai task orchestrate <task-id>",
+    summary:
+      "plan across the model registry, decide with the decision layer and execute through Frontier",
+  },
+  {
     name: "ai task trace <task-id>",
     summary: "reconstruct the task trace from the event log",
   },
@@ -41,6 +46,11 @@ export const COMMANDS: readonly {
   {
     name: "ai task usage <task-id>",
     summary: "show token, call and iteration usage",
+  },
+  {
+    name: "ai task decisions <task-id>",
+    summary:
+      "show every bounded question this task asked and how it was answered",
   },
   {
     name: "ai task cost <task-id>",
@@ -57,6 +67,21 @@ export const COMMANDS: readonly {
   {
     name: "ai approvals",
     summary: "list pending, granted, consumed and expired approvals",
+  },
+  {
+    name: "ai policy",
+    summary:
+      "show the enforcement policy and capabilities (--check to evaluate one operation)",
+  },
+  {
+    name: "ai decision",
+    summary:
+      "show the decision layer, its budget and what it has decided here (offline)",
+  },
+  {
+    name: "ai models",
+    summary:
+      "show the model catalog, declared capabilities and provider reachability (offline)",
   },
 ];
 

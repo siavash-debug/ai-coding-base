@@ -10,15 +10,39 @@ import {
   CONTEXT_SELECTION_VERSION,
   CONTEXT_STRATEGY,
   DEFAULT_CONTEXT_CONFIG,
+  DEFAULT_DECISION_CONFIG,
+  DEFAULT_FRONTIER_CONFIG,
   DEFAULT_LLM_CONFIG,
   type ContextConfig,
+  type DecisionConfig,
+  type FrontierConfig,
   type LlmConfig,
   type ProjectConfig,
   ensureRuntimeLayout,
+  generativeModels,
   isMissingFile,
   readProjectConfig,
   writeProjectConfig,
 } from "../adapters/config/project-config.js";
+import { createJevHttpProvider } from "../adapters/decision/jev-http-provider.js";
+import { createTypeSafeProvider } from "../adapters/decision/typesafe-provider.js";
+import { createLlmFrontier } from "../adapters/frontier/llm-frontier.js";
+import { createModelRegistry, type ModelRegistry } from "../models/registry.js";
+import {
+  createOrchestrator,
+  type Orchestrator,
+} from "../orchestration/orchestrator.js";
+import type { FrontierExecutor } from "../ports/frontier.js";
+import {
+  type DecisionEngine,
+  type DecisionEngineInfo,
+  createDecisionEngine,
+} from "../decisions/engine.js";
+import type { DecisionProvider } from "../decisions/provider.js";
+import {
+  type DecisionCoordinatorFactory,
+  createDecisionCoordinatorFactory,
+} from "./decision-coordinator.js";
 import {
   OPENAI_COMPATIBLE_PROVIDER_ID,
   createOpenAiCompatibleProvider,
@@ -33,11 +57,18 @@ import {
   createGitChangeProvider,
 } from "../adapters/git/git-change-provider.js";
 import { createNodeProcessRunner } from "../adapters/process/node-process-runner.js";
+import { createGuardedNetwork } from "../adapters/sandbox/guarded-network.js";
 import { createFileRepositoryReader } from "../adapters/repository/file-repository-reader.js";
 import { createFileAppendLock } from "../adapters/storage/file-append-lock.js";
 import { createTimerSleep } from "../adapters/time/timer-sleep.js";
 import { createProcessEnvironment } from "../ports/environment.js";
 import type { Environment } from "../ports/environment.js";
+import {
+  type AccessPolicy,
+  initialAccessPolicy,
+} from "../policy/access-policy.js";
+import type { SandboxBoundary } from "../ports/operation.js";
+import { createLocalSandbox } from "../adapters/sandbox/local-sandbox.js";
 import type { HttpTransport } from "../ports/http-transport.js";
 import type { Sleep } from "../ports/sleep.js";
 import {
@@ -67,6 +98,10 @@ import {
   type ApprovalLedger,
   createApprovalLedger,
 } from "./approval-ledger.js";
+import {
+  type CredentialRequirement,
+  providerCredentialRequirements,
+} from "./credential-preflight.js";
 import type { ApprovalService } from "./approval-service.js";
 import { createApprovalService } from "./approval-service.js";
 import {
@@ -80,6 +115,12 @@ import { createEventRecorder } from "./event-recorder.js";
 import { type InitialProject, buildInitialProject } from "./init-project.js";
 import type { RunTask } from "./run-task.js";
 import { createRunTask } from "./run-task.js";
+import {
+  OPERATION_GATEWAY_ACTOR,
+  type OperationGatewayFactory,
+  capabilityEnvelope,
+  createOperationGatewayFactory,
+} from "./operation-gateway.js";
 import type { SessionService } from "./session-service.js";
 import { createSessionService } from "./session-service.js";
 import type { TaskService } from "./task-service.js";
@@ -135,6 +176,50 @@ export interface Runtime {
   readonly runner: AgentRunner;
   readonly provider: LlmProvider;
   readonly policy: ReturnType<typeof defaultPolicy>;
+  /**
+   * The decision layer for this workspace, and what it is.
+   *
+   * `provider` is absent when no decision engine is configured, which is the
+   * default: bounded questions are then answered by deterministic code and recorded
+   * as such, with no network call (ADR-004, ADR-052).
+   */
+  readonly decision: DecisionConfig;
+  readonly decisionProvider?: DecisionProvider;
+  readonly decisionEngine: DecisionEngineInfo;
+  readonly decisionLayer: DecisionCoordinatorFactory;
+  /**
+   * The model catalog this workspace may route to, and the routing policy.
+   *
+   * `registry` is knowledge (what models can do); `frontier` executes a chosen step;
+   * `orchestrator` is the use case that joins them to the decision layer. Routing is
+   * off unless the project enabled it, so a runtime without frontier configuration
+   * behaves exactly as it did before Phase H.
+   */
+  readonly registry: ModelRegistry;
+  readonly frontier: FrontierExecutor;
+  readonly frontierConfig: FrontierConfig;
+  readonly frontierProviders: readonly string[];
+  readonly orchestrator: Orchestrator;
+  /**
+   * The credentials this runtime would need to reach the providers it wired.
+   *
+   * Derived once, here, from the same configuration the adapters were built from, so
+   * a run can refuse before it starts rather than discovering an unset variable at
+   * the first call (ADR-033). `Environment` is exposed alongside it because checking
+   * presence must go through the same single reader the adapters use.
+   */
+  readonly credentialRequirements: readonly CredentialRequirement[];
+  readonly environment: Environment;
+  /**
+   * The enforcement boundary for this workspace, and the capabilities granted.
+   *
+   * Exposed for `ai doctor`, `ai policy` and the security tests: the runtime is
+   * the only place a sandbox is constructed, and nothing above it ever receives
+   * the underlying `fs`, `child_process`, `fetch` or `process.env`.
+   */
+  readonly accessPolicy: AccessPolicy;
+  readonly sandbox: SandboxBoundary;
+  readonly operations: OperationGatewayFactory;
   readonly modelRates: readonly ModelRate[];
   readonly providerId: string;
   readonly modelId: string;
@@ -166,6 +251,144 @@ export interface RuntimeOptions {
   readonly processRunner?: ProcessRunner;
   /** Overrides context selection *and* recording, as the other services allow. */
   readonly contextEngine?: ContextEngine;
+  /**
+   * Overrides the configured access policy.
+   *
+   * Used by tests to construct a project whose boundary allows exactly one thing,
+   * so "this capability is denied" can be proven without editing a configuration
+   * file. It is never set by the CLI: the CLI reads policy from the project.
+   */
+  readonly accessPolicy?: AccessPolicy;
+  /** Overrides the sandbox boundary, for boundary-level tests. */
+  readonly sandbox?: SandboxBoundary;
+  /**
+   * Overrides the configured decision provider.
+   *
+   * Used by tests to drive the decision path deterministically, exactly as
+   * `provider` overrides the LLM provider. An injected provider makes the decision
+   * layer configured even when configuration says `disabled`, because injection *is*
+   * configuration for a test.
+   */
+  readonly decisionProvider?: DecisionProvider;
+  /**
+   * Overrides the provider adapters the frontier executes through.
+   *
+   * Used by tests to drive multi-model execution without a transport, exactly as
+   * `provider` overrides the single configured LLM provider. The registry, the plan
+   * build and every decision still run for real.
+   */
+  readonly frontierProviders?: ReadonlyMap<string, LlmProvider>;
+  /**
+   * Overrides the frontier executor itself.
+   *
+   * Used by tests to script multi-model execution without a transport. The registry,
+   * the plan build and every decision still run for real, so what is being tested is
+   * the orchestration and not the fake.
+   */
+  readonly frontier?: FrontierExecutor;
+}
+
+/**
+ * Chooses the decision provider from configuration.
+ *
+ * Absent means "no decision engine is installed", which the engine reports honestly
+ * and which is a fully supported state: every bounded question is then answered by
+ * the deterministic gate or the deterministic fallback, and recorded. There is no
+ * neutral provider that invents answers, so none is constructed (ADR-052).
+ */
+function buildDecisionProvider(
+  decision: DecisionConfig,
+  deps: {
+    readonly clock: Clock;
+    readonly environment: Environment;
+    readonly transport: HttpTransport;
+  },
+): DecisionProvider | undefined {
+  if (decision.provider === "disabled") {
+    return undefined;
+  }
+  if (decision.provider === "typesafe") {
+    // TypeSafe is the JEV implementation, reached through the same guarded transport
+    // as every other provider: configuring it does not make its host reachable.
+    return createTypeSafeProvider({
+      credentialEnvVar: decision.credentialEnvVar,
+      environment: deps.environment,
+      transport: deps.transport,
+      clock: deps.clock,
+      ...(decision.baseUrl === undefined ? {} : { baseUrl: decision.baseUrl }),
+      ...(decision.defaultModel === undefined
+        ? {}
+        : { defaultModel: decision.defaultModel }),
+      ...(decision.timeoutMs === undefined
+        ? {}
+        : { timeoutMs: decision.timeoutMs }),
+    });
+  }
+  return createJevHttpProvider({
+    baseUrl: decision.baseUrl,
+    credentialEnvVar: decision.credentialEnvVar,
+    environment: deps.environment,
+    transport: deps.transport,
+    clock: deps.clock,
+    ...(decision.modelId === undefined ? {} : { modelId: decision.modelId }),
+    ...(decision.timeoutMs === undefined
+      ? {}
+      : { timeoutMs: decision.timeoutMs }),
+  });
+}
+
+/**
+ * Builds the provider adapters the frontier may execute through.
+ *
+ * One adapter per configured provider, each bound to the models the registry declares
+ * for it and to the *guarded* transport — so a frontier step cannot become the one
+ * call path that skips provider egress policy. A provider with no registered model is
+ * not constructed at all: there would be nothing it could serve.
+ */
+function buildFrontierProviders(
+  frontier: FrontierConfig,
+  deps: {
+    readonly clock: Clock;
+    readonly environment: Environment;
+    readonly transport: HttpTransport;
+    readonly sleep: Sleep;
+  },
+): ReadonlyMap<string, LlmProvider> {
+  const providers = new Map<string, LlmProvider>();
+  for (const provider of frontier.providers) {
+    // Only generative models are ever handed to a generative adapter. A registered
+    // model with a non-generative role stays knowledge in the registry; it cannot
+    // become a model id this adapter claims to serve, so no plan can reach it.
+    const models = generativeModels(frontier)
+      .filter((model) => model.providerId === provider.id)
+      .map((model) => model.modelId);
+    const [primary, ...additional] = models;
+    if (primary === undefined) {
+      continue;
+    }
+    const adapter = createOpenAiCompatibleProvider({
+      id: provider.id,
+      baseUrl: provider.baseUrl,
+      modelId: primary,
+      additionalModels: additional,
+      credentialEnvVar: provider.credentialEnvVar,
+      environment: deps.environment,
+      transport: deps.transport,
+      clock: deps.clock,
+      ...(provider.timeoutMs === undefined
+        ? {}
+        : { timeoutMs: provider.timeoutMs }),
+    });
+    providers.set(
+      provider.id,
+      createRetryingProvider({
+        provider: adapter,
+        sleep: deps.sleep,
+        maxAttempts: provider.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+      }),
+    );
+  }
+  return providers;
 }
 
 /**
@@ -269,9 +492,38 @@ export async function openRuntime(options: RuntimeOptions): Promise<Runtime> {
   });
 
   const policy = defaultPolicy();
+  /**
+   * The access policy this runtime enforces, resolved before anything that can
+   * reach outside the process.
+   *
+   * Two boundaries read it: the sandbox that performs operations, and the guard on
+   * the platform's *own* provider egress below. Resolving it once is what keeps
+   * "which hosts may this project reach?" a single answer (ADR-050).
+   */
+  const accessPolicy = options.accessPolicy ?? config.policy;
+  /**
+   * What every real provider adapter is handed instead of the raw transport.
+   *
+   * Configuring a provider does not make its host reachable: the host must also be
+   * listed in `policy.network.providerHosts`, or the adapter is constructed and then
+   * refused at the transport before a socket exists. This is the same guard the local
+   * sandbox builds over the same lists, applied here so that no provider — LLM or
+   * decision — can become the one path that skips it.
+   */
+  const providerEgress = createGuardedNetwork({
+    transport,
+    operationEnabled: accessPolicy.network.enabled,
+    operationHosts: accessPolicy.network.allowedHosts,
+    providerHosts: accessPolicy.network.providerHosts,
+  }).providerTransport;
   const provider =
     options.provider ??
-    buildProvider(config.llm, { clock, environment, transport, sleep });
+    buildProvider(config.llm, {
+      clock,
+      environment,
+      transport: providerEgress,
+      sleep,
+    });
   const modelId = provider.models[0];
   const runner = createSimulatedAgentRunner({
     provider,
@@ -345,6 +597,135 @@ export async function openRuntime(options: RuntimeOptions): Promise<Runtime> {
       workspace,
       selectionIds: createUuidIdFactory(),
     });
+  /**
+   * The enforcement boundary, constructed here and nowhere else.
+   *
+   * The sandbox is bound to this one workspace, so the fence every reference
+   * resolves against is a property of the runtime rather than an argument (ADR-048).
+   * The envelope is derived from the access policy: a runtime never negotiates its
+   * own capabilities, and an empty envelope means the runtime can plan and record
+   * but not reach anything.
+   */
+  const sandbox =
+    options.sandbox ??
+    createLocalSandbox({
+      scope: {
+        projectId: project.id,
+        workspaceId: workspace.id,
+        workspaceRoot: workspace.rootPath,
+        projectRoot: options.projectRoot,
+      },
+      policy: accessPolicy,
+      clock,
+      environment,
+      transport,
+    });
+  /**
+   * The decision layer.
+   *
+   * Built after the recorder — decisions are recorded as events like everything else
+   * — and before `runTask`, which asks it the bounded questions along the attempt
+   * path. The engine holds no scope: scope is bound per attempt in the coordinator,
+   * so a decision cannot be attributed to a task or workspace it does not belong to.
+   */
+  const decisionProvider =
+    options.decisionProvider ??
+    buildDecisionProvider(config.decision, {
+      clock,
+      environment,
+      transport: providerEgress,
+    });
+  const decisionEngine: DecisionEngine = createDecisionEngine({
+    clock,
+    ...(decisionProvider === undefined ? {} : { provider: decisionProvider }),
+  });
+  const decisionLayer = createDecisionCoordinatorFactory({
+    engine: decisionEngine,
+    decisions,
+    recorder,
+    store,
+    clock,
+    config: config.decision,
+    rates: config.modelRates,
+    projectId: project.id,
+  });
+
+  /**
+   * Model registry, frontier executor and orchestration use case.
+   *
+   * Constructed from this project's own configuration, so one project's models are
+   * never visible to another. The frontier receives provider adapters that are already
+   * bound to the guarded transport: no orchestration path can reach a vendor host
+   * that policy has not allowed (ADR-050, ADR-056).
+   */
+  const registry = createModelRegistry({ models: config.frontier.models });
+  const frontierProviders = buildFrontierProviders(config.frontier, {
+    clock,
+    environment,
+    transport: providerEgress,
+    sleep,
+  });
+  const frontier =
+    options.frontier ??
+    createLlmFrontier({
+      providers: options.frontierProviders ?? frontierProviders,
+      registry,
+      clock,
+    });
+  const orchestrator = createOrchestrator({
+    registry,
+    rates: config.modelRates,
+    frontier,
+    sessions,
+    tasks,
+    recorder,
+    store,
+    decisions: decisionLayer,
+    clock,
+    projectId: project.id,
+    workspace,
+    config: {
+      enabled: config.frontier.enabled,
+      mode: config.frontier.routing.mode,
+      allowDecomposition: config.frontier.routing.allowDecomposition,
+      allowParallel: config.frontier.routing.allowParallel,
+      maxModelCalls: config.frontier.routing.maxModelCalls,
+      maxRetriesPerStep: config.frontier.routing.maxRetriesPerStep,
+    },
+  });
+
+  /**
+   * What this runtime would need to reach the providers it just wired.
+   *
+   * Computed from the installed decision provider, the configured LLM provider and
+   * the frontier adapters that were actually built — never from a list kept in step
+   * by hand. `ai task run` and `ai task orchestrate` check it before starting work;
+   * `ai doctor` reports the same facts in more detail (ADR-033).
+   */
+  const credentialRequirements = providerCredentialRequirements({
+    llm: config.llm,
+    decision: config.decision,
+    ...(decisionProvider === undefined
+      ? {}
+      : { decisionProviderId: decisionProvider.id }),
+    frontier: config.frontier,
+    frontierProviderIds: [
+      ...(options.frontierProviders ?? frontierProviders).keys(),
+    ],
+  });
+
+  const operations = createOperationGatewayFactory({
+    policy: accessPolicy,
+    envelope: capabilityEnvelope(accessPolicy),
+    boundary: sandbox,
+    ledger,
+    approvals,
+    recorder,
+    clock,
+    ids: createUuidIdFactory(),
+    actor: OPERATION_GATEWAY_ACTOR,
+  });
+
   const runTask = createRunTask({
     tasks,
     sessions,
@@ -360,6 +741,9 @@ export async function openRuntime(options: RuntimeOptions): Promise<Runtime> {
     modelId,
     context,
     contextConfig: config.context,
+    operations,
+    recorder,
+    decisionLayer,
   });
 
   return {
@@ -384,6 +768,22 @@ export async function openRuntime(options: RuntimeOptions): Promise<Runtime> {
     runner,
     provider,
     policy,
+    accessPolicy,
+    sandbox,
+    operations,
+    decision: config.decision,
+    ...(decisionProvider === undefined ? {} : { decisionProvider }),
+    decisionEngine: decisionEngine.info,
+    decisionLayer,
+    registry,
+    frontier,
+    frontierConfig: config.frontier,
+    frontierProviders: [
+      ...(options.frontierProviders ?? frontierProviders).keys(),
+    ].sort(),
+    orchestrator,
+    credentialRequirements,
+    environment,
     modelRates: config.modelRates,
     providerId: provider.id,
     modelId,
@@ -412,6 +812,31 @@ export interface InitializeProjectOptions {
    * `ai init` produces a project that can select context immediately.
    */
   readonly context?: ContextConfig;
+  /**
+   * Decision-layer configuration to write. Defaults to `disabled`, so a freshly
+   * initialised project needs no decision service and makes no decision call.
+   */
+  readonly decision?: DecisionConfig;
+  /**
+   * Frontier configuration to write. Defaults to the documented model catalog with
+   * routing disabled, so a freshly initialised project knows which models exist
+   * without being able to call any of them.
+   */
+  readonly frontier?: FrontierConfig;
+  /**
+   * Access policy to write. Defaults to read-only within the workspace.
+   *
+   * Writes, process execution, network access and environment access are not part
+   * of the default: each is a deliberate operator decision made visible in
+   * `.ai/project.json` rather than granted implicitly by initialisation.
+   */
+  readonly policy?: AccessPolicy;
+  /**
+   * Pricing table to write. Defaults to the offline rates, so a project is usable
+   * before anyone has decided what a model costs — and an unknown model stays
+   * *unpriced* rather than becoming free.
+   */
+  readonly modelRates?: readonly ModelRate[];
 }
 
 export interface InitializeProjectResult {
@@ -461,7 +886,7 @@ export async function initializeProject(
       clock,
       newProjectId: () => createUuidIdFactory().next(),
       newWorkspaceId: () => createUuidIdFactory().next(),
-      modelRates: offlineModelRates(),
+      modelRates: options.modelRates ?? offlineModelRates(),
     },
   );
 
@@ -474,6 +899,9 @@ export async function initializeProject(
     modelRates: initial.modelRates,
     llm: options.llm ?? DEFAULT_LLM_CONFIG,
     context: options.context ?? DEFAULT_CONTEXT_CONFIG,
+    policy: options.policy ?? initialAccessPolicy(),
+    decision: options.decision ?? DEFAULT_DECISION_CONFIG,
+    frontier: options.frontier ?? DEFAULT_FRONTIER_CONFIG,
   };
   await writeProjectConfig(options.projectRoot, config);
   return { config, configPath, initial };

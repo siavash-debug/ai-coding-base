@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { assertLlmConfig } from "../../src/adapters/config/project-config.js";
 import { OPENAI_COMPATIBLE_PROVIDER_ID } from "../../src/adapters/llm/openai-compatible-provider.js";
+import { initialAccessPolicy } from "../../src/policy/access-policy.js";
 import { eventsDirectory } from "../../src/adapters/storage/layout.js";
 import { createFixedEnvironment } from "../../src/ports/environment.js";
 import type { StoredTask } from "../../src/ports/task-repository.js";
@@ -13,6 +14,7 @@ import {
   createTestProject,
   createTickingClock,
 } from "../support/project.js";
+import { allowingProviderHost } from "../support/policy.js";
 import { chatCompletionBody, createFakeTransport } from "../support/llm.js";
 
 /**
@@ -172,6 +174,44 @@ describe("runtime provider selection", () => {
     const raw = await readEventLog(subject);
     expect(raw).not.toContain("AI_TEST_UNSET_KEY");
   });
+
+  it("refuses a configured provider whose host the policy does not list", async () => {
+    // The transport would answer happily if it were reached: what stops the call is
+    // the egress guard, not a scripted failure.
+    const transport = createFakeTransport([jsonBody(), jsonBody()]);
+    const subject = tracked(
+      await createTestProject({
+        clock: createTickingClock(),
+        llm: {
+          provider: "openai-compatible",
+          baseUrl: BASE_URL,
+          modelId: "fixture-model",
+          credentialEnvVar: "FIXTURE_API_KEY",
+        },
+        environment: createFixedEnvironment({ FIXTURE_API_KEY: FIXTURE_KEY }),
+        transport,
+      }),
+    );
+
+    const stored = await createTask(subject);
+    const result = await subject.runtime.runTask.run(stored);
+    expect(result.outcome).toBe("provider-failed");
+    // Refused at the transport: bounded to one attempt, and not classified as a
+    // retryable network failure.
+    expect(result.reason).toContain("1 attempt");
+    expect(transport.requests).toHaveLength(0);
+
+    const trace = await subject.runtime.traces.read(
+      scopeOf(subject),
+      stored.task.id,
+    );
+    expect(trace.metrics.llmCalls).toBe(0);
+    expect(trace.metrics.failedLlmCalls).toBe(1);
+
+    const raw = await readEventLog(subject);
+    expect(raw).not.toContain(FIXTURE_KEY);
+    expect(raw).not.toContain("fixture.invalid");
+  });
 });
 
 describe("a real provider run, offline and fully accounted", () => {
@@ -189,6 +229,9 @@ describe("a real provider run, offline and fully accounted", () => {
         },
         environment: createFixedEnvironment({ FIXTURE_API_KEY: FIXTURE_KEY }),
         transport,
+        // The configured host must also be reachable by policy, or the adapter is
+        // refused at the transport before any socket exists.
+        policy: allowingProviderHost(initialAccessPolicy(), "fixture.invalid"),
       }),
     );
 

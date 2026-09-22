@@ -17,7 +17,9 @@ import {
   type Environment,
   createFixedEnvironment,
 } from "../../src/ports/environment.js";
+import { initialAccessPolicy } from "../../src/policy/access-policy.js";
 import { createTestProject, type TestProject } from "../support/project.js";
+import { allowingProviderHost } from "../support/policy.js";
 
 const clock = createFixedClock("2026-09-20T10:00:00.000Z");
 const RUNTIME_VERSION = `v${MINIMUM_NODE_MAJOR}.21.0`;
@@ -41,7 +43,13 @@ const FIXTURE_KEY = "sk-test-fixture-abcdefghijklmnop";
  */
 async function configuredProject(input: {
   readonly credentialEnvVar: string;
+  /** Provider hosts to make reachable by policy, as an operator would. */
+  readonly providerHosts?: readonly string[];
 }): Promise<string> {
+  const policy = (input.providerHosts ?? []).reduce(
+    allowingProviderHost,
+    initialAccessPolicy(),
+  );
   const created = await createTestProject({
     llm: {
       provider: "openai-compatible",
@@ -49,6 +57,7 @@ async function configuredProject(input: {
       modelId: "fixture-model",
       credentialEnvVar: input.credentialEnvVar,
     },
+    policy,
   });
   projects.push(created);
   return created.root;
@@ -118,7 +127,14 @@ describe("ai doctor: a healthy project", () => {
       "llm-provider",
       "approvals",
       "event-log",
+      // Phase G: the recorded decisions are auditable on their own, and the decision
+      // layer reports what it is without calling anything.
+      "decision-audit",
+      "orchestration-audit",
       "trace",
+      "decision-layer",
+      "frontier",
+      "enforcement",
       "context-config",
       "context-repository",
       "context-engine",
@@ -197,6 +213,7 @@ describe("ai doctor: a healthy project", () => {
     // without a network call, so doctor can run anywhere.
     const root = await configuredProject({
       credentialEnvVar: "FIXTURE_API_KEY",
+      providerHosts: ["fixture.invalid"],
     });
     const report = await doctorOn(root, {
       environment: createFixedEnvironment({ FIXTURE_API_KEY: FIXTURE_KEY }),
@@ -206,6 +223,27 @@ describe("ai doctor: a healthy project", () => {
     expect(provider.detail).toContain("fixture.invalid");
     expect(provider.detail).toContain("FIXTURE_API_KEY is set");
     // The value itself is never in the report.
+    expect(JSON.stringify(report)).not.toContain(FIXTURE_KEY);
+  });
+
+  it("warns when a credentialed provider's host is not reachable by policy", async () => {
+    // The credential is present and the adapter is constructible, yet every call
+    // would be refused at the transport. Naming that here is the difference between
+    // a two-second fix and an afternoon reading `FORBIDDEN` at run time.
+    const root = await configuredProject({
+      credentialEnvVar: "FIXTURE_API_KEY",
+    });
+    const report = await doctorOn(root, {
+      environment: createFixedEnvironment({ FIXTURE_API_KEY: FIXTURE_KEY }),
+    });
+    const provider = checkById(report, "llm-provider");
+
+    expect(provider.status).toBe("warn");
+    expect(provider.detail).toContain("FIXTURE_API_KEY is set");
+    expect(provider.detail).toContain("policy.network.providerHosts");
+    expect(provider.detail).toContain("fixture.invalid");
+    // A warning, not a failure: nothing is broken, and nothing was sent.
+    expect(report.exitCode).toBe(0);
     expect(JSON.stringify(report)).not.toContain(FIXTURE_KEY);
   });
 

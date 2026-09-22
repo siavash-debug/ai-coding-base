@@ -7,8 +7,17 @@ import { evaluatePolicy } from "../decisions/policy.js";
 import {
   type OperationKind,
   type RiskLevel,
+  effectiveRiskLevel,
   requiresHumanApproval,
 } from "../decisions/risk.js";
+import {
+  ATTEMPT_ROUTE_IDS,
+  type AttemptRouteId,
+  type CompletionAssessmentId,
+  type DecisionOutcomeMeta,
+  type EscalationRecommendationId,
+  type ToolCandidate,
+} from "../decisions/domains.js";
 import { evaluateBudget } from "../observability/budget.js";
 import type { ModelRate } from "../observability/cost.js";
 import { estimateCost } from "../observability/cost.js";
@@ -17,7 +26,16 @@ import type { LlmCallRecord } from "../observability/metrics.js";
 import { computeTaskMetrics } from "../observability/metrics.js";
 import type { AgentSession } from "../sessions/agent-session.js";
 import type { Task } from "../tasks/task.js";
-import type { AgentAttempt, AgentRunner } from "../ports/agent-runner.js";
+import type {
+  AgentAttempt,
+  AgentDecisionPort,
+  AgentRunner,
+  AgentToolPlan,
+} from "../ports/agent-runner.js";
+import {
+  LIST_WORKSPACE_TOOL,
+  READ_SELECTED_FILE_TOOL,
+} from "../ports/agent-runner.js";
 import type { ContextEngine } from "../ports/context-engine.js";
 import type { StoredTask } from "../ports/task-repository.js";
 import type { Workspace } from "../workspaces/workspace.js";
@@ -32,9 +50,16 @@ import {
 import type { ApprovalService } from "./approval-service.js";
 import type { DecisionService } from "./decision-service.js";
 import { selectContextForTask } from "./context-service.js";
+import type { EventRecorder } from "./event-recorder.js";
 import { taskCorrelationId } from "./event-recorder.js";
+import {
+  OPERATION_GATEWAY_ACTOR,
+  type OperationGatewayFactory,
+  declareCapabilities,
+} from "./operation-gateway.js";
 import type { SessionService } from "./session-service.js";
 import type { TaskService } from "./task-service.js";
+import type { DecisionCoordinatorFactory } from "./decision-coordinator.js";
 
 /**
  * The task run use case: one bounded attempt, fully recorded.
@@ -96,6 +121,14 @@ export interface RunTaskResult {
   readonly resumed: boolean;
   /** The approval request that suspended this run, or the grant it consumed. */
   readonly approvalRequestId?: string;
+  /** The execution route the decision layer chose (or code chose by default). */
+  readonly route?: AttemptRouteId;
+  /** The completion assessment, when one was made. Advisory only. */
+  readonly completionAssessment?: CompletionAssessmentId;
+  /** Whether a human review was recommended, and by which layer. */
+  readonly escalation?: EscalationRecommendationId;
+  /** Attempt-level retries the bounded retry gate actually authorised. */
+  readonly retriesSpent?: number;
 }
 
 export interface RunTaskDeps {
@@ -115,10 +148,86 @@ export interface RunTaskDeps {
   /** Chooses the context this attempt is run with. Required, not optional. */
   readonly context: ContextEngine;
   readonly contextConfig: ContextConfig;
+  /**
+   * The enforcement boundary every operation of this attempt goes through.
+   *
+   * Required, not optional. A run that could be constructed without a boundary
+   * would be a run whose runner has no way to touch the world — or worse, a run
+   * whose runner reaches the host directly. Making it mandatory means the only way
+   * to get work done is through policy, capability and sandbox evaluation (ADR-045).
+   */
+  readonly operations: OperationGatewayFactory;
+  /** Used to declare the attempt's capability envelope before any operation. */
+  readonly recorder: EventRecorder;
+  /**
+   * The decision layer: the only way a bounded question becomes a recorded decision.
+   *
+   * Required, not optional, for the same reason the operation gateway is: a run that
+   * could be constructed without a decision layer would be a run that silently
+   * invents answers instead of recording how they were reached. A project with no
+   * decision engine configured still passes a coordinator — one whose engine answers
+   * deterministically and records that it did (ADR-052).
+   */
+  readonly decisionLayer: DecisionCoordinatorFactory;
 }
 
 export interface RunTask {
   run(stored: StoredTask): Promise<RunTaskResult>;
+}
+
+/**
+ * The deterministic tool set for one attempt, ordered from the operation a
+ * decision-layer-free attempt performs to the ones only a decision may add.
+ *
+ * Candidates come from the *capability envelope* — the attempt's declared authority
+ * — and from the context that was actually selected. A decision layer chooses among
+ * these; it cannot add a tool, and it cannot reach an operation the envelope does not
+ * contain. `minimal` narrows to the first candidate, so the route semantics are
+ * "a decision layer may do less, never more" (ADR-055).
+ */
+function planAttemptTools(input: {
+  readonly envelope: readonly string[];
+  readonly selectedRefs: readonly string[];
+  readonly route: AttemptRouteId;
+}): AgentToolPlan {
+  const candidates: ToolCandidate[] = [];
+  if (input.envelope.includes("filesystem.read")) {
+    candidates.push({
+      toolId: LIST_WORKSPACE_TOOL,
+      label: "List workspace files",
+      operation: "read",
+      capability: "filesystem.read",
+    });
+    const ref = input.selectedRefs[0];
+    if (ref !== undefined) {
+      candidates.push({
+        toolId: READ_SELECTED_FILE_TOOL,
+        label: `Read the selected context file ${ref}`,
+        operation: "read",
+        capability: "filesystem.read",
+        ref,
+      });
+    }
+  }
+  const narrowed =
+    input.route === "minimal" ? candidates.slice(0, 1) : candidates;
+  return {
+    candidates: narrowed,
+    // The declared default is the first candidate: the operation an attempt without
+    // a decision layer already performs. A fallback therefore changes nothing.
+    defaultToolId: narrowed[0]?.toolId ?? LIST_WORKSPACE_TOOL,
+  };
+}
+
+/** How a bounded question was answered, for a human reading a run report. */
+export function describeDecisionAnswer(meta: DecisionOutcomeMeta): string {
+  if (meta.answeredBy === "provider") {
+    return `decision provider "${meta.providerId ?? "unknown"}"`;
+  }
+  if (meta.answeredBy === "fallback") {
+    return `deterministic fallback (${meta.fallbackReason ?? "unknown"})`;
+  }
+  return "deterministic code";
 }
 
 /** Options for a step gate: the policy engine's own vocabulary. */
@@ -462,38 +571,123 @@ export function createRunTask(deps: RunTaskDeps): RunTask {
         };
       }
 
-      let attempt: AgentAttempt;
-      try {
-        attempt = await deps.runner.attempt({
-          task: current.task,
-          workspace: deps.workspace,
-          providerId: deps.providerId,
-          modelId: deps.modelId,
-          correlationId: decisionContext().correlationId,
-          context: selectedContext.bundle,
-        });
-      } catch (error) {
-        // An unexpected runtime error still has to leave an honest log: the
-        // session is closed as failed before the error is allowed to propagate.
-        const detail = isDomainError(error)
-          ? error.code
-          : error instanceof Error
-            ? error.name
-            : "unknown error";
-        const ended = await deps.sessions.end(
-          active(),
-          "failed",
-          `runtime error (${detail})`,
-        );
-        messages.push(
-          `runtime error (${detail}); session ${ended.id} ended as failed`,
-        );
-        throw error;
-      }
+      // Declare the attempt's capability envelope, then hand the runner the only
+      // interface it has for touching the world. Both happen before the runner
+      // starts, so the log states what was authorised before anything was asked.
+      const operations = deps.operations.forAttempt({
+        projectId: task.projectId,
+        workspaceId: task.workspaceId,
+        taskId: task.id,
+        sessionId: session.id,
+        correlationId: decisionContext().correlationId,
+      });
+      await declareCapabilities({
+        recorder: deps.recorder,
+        gateway: deps.operations,
+        actor: OPERATION_GATEWAY_ACTOR,
+        workspaceId: task.workspaceId,
+        taskId: task.id,
+        sessionId: session.id,
+        correlationId: decisionContext().correlationId,
+      });
       messages.push(
-        `runner "${deps.runner.id}" (${deps.runner.kind}) reported ` +
-          `${attempt.steps.length} step(s)`,
+        `capability envelope (policy ${deps.operations.policyId}): ` +
+          (deps.operations.envelope.length === 0
+            ? "none — no operation can be performed"
+            : deps.operations.envelope.join(", ")),
       );
+
+      /**
+       * The decision layer for this attempt, bound to the workspace, task and session
+       * it may be asked about. Every question below is bounded, every answer is
+       * validated, and none of them can grant authority (`../decisions/domains.ts`).
+       */
+      const coordinator = deps.decisionLayer.forAttempt({
+        workspaceId: task.workspaceId,
+        taskId: task.id,
+        sessionId: session.id,
+        correlationId: decisionContext().correlationId,
+      });
+
+      // Routing: which posture this attempt takes. A decision layer may narrow the
+      // attempt — fewer tools, or defer to a human — and can never widen it. With no
+      // decision layer registered only the standard route is offered, so the
+      // deterministic gate answers and nothing is called (ADR-052).
+      const routeDecision = await coordinator.route({
+        taskRiskLevel: task.riskLevel,
+        routes: coordinator.providerConfigured
+          ? [...ATTEMPT_ROUTE_IDS]
+          : ["standard"],
+      });
+      messages.push(
+        `route "${routeDecision.routeId}" (${describeDecisionAnswer(routeDecision.meta)}` +
+          (routeDecision.reasonCode === undefined
+            ? ")"
+            : `, ${routeDecision.reasonCode})`),
+      );
+
+      if (routeDecision.deferToHuman) {
+        // No model call and no operation: the attempt is handed to a human. The
+        // recommendation is advisory — it creates no approval and grants nothing —
+        // and the task lands in `review`, which is the human-owned gate that already
+        // exists (ADR-054).
+        const escalation = await coordinator.recommendEscalation({
+          facts: [`route:${routeDecision.routeId}`, `risk:${task.riskLevel}`],
+          securityRefusal: false,
+        });
+        const reason =
+          "the decision layer deferred this attempt to a human; no model call and no operation were performed";
+        session = await deps.sessions.end(active(), "aborted", reason);
+        current = await deps.tasks.transition(current, "verification");
+        current = await deps.tasks.transition(current, "review");
+        messages.push(
+          `${reason}; escalation recommendation: ${escalation.recommendation} ` +
+            `(${describeDecisionAnswer(escalation.meta)})`,
+          `close or fail it with: ai task complete ${current.task.id}`,
+        );
+        return {
+          outcome: "awaiting-review",
+          task: current.task,
+          session,
+          reason,
+          messages,
+          resumed: resumedRun,
+          route: routeDecision.routeId,
+          escalation: escalation.recommendation,
+        };
+      }
+
+      const toolPlan = planAttemptTools({
+        envelope: deps.operations.envelope,
+        selectedRefs: selection.selected.map((candidate) => candidate.ref),
+        route: routeDecision.routeId,
+      });
+      messages.push(
+        toolPlan.candidates.length === 0
+          ? "no tool is permitted by this attempt's capability envelope"
+          : `tool candidates: ${toolPlan.candidates
+              .map((candidate) => candidate.toolId)
+              .join(", ")}`,
+      );
+
+      /**
+       * The runner's view of the decision layer: exactly one question, answered and
+       * recorded. It never receives the coordinator itself, so it cannot ask about
+       * routing, retries, risk or completion.
+       */
+      const agentDecisions: AgentDecisionPort = {
+        selectTool: async (plan) => {
+          const chosen = await coordinator.selectTool(plan);
+          return {
+            toolId: chosen.toolId,
+            source: chosen.meta.answeredBy,
+            decisionId: chosen.meta.decisionId,
+            ...(chosen.reasonCode === undefined
+              ? {}
+              : { reasonCode: chosen.reasonCode }),
+          };
+        },
+      };
 
       const llmRecords: LlmCallRecord[] = [];
       let budgetStop: string | undefined;
@@ -502,186 +696,337 @@ export function createRunTask(deps: RunTaskDeps): RunTask {
         | { outcome: "awaiting-approval"; reason: string; requestId: string }
         | undefined;
       let verificationFailure: string | undefined;
+      let verificationChecks = 0;
+      let verificationFailures = 0;
       let providerFailure:
-        | { failureKind: LlmFailureKind; attempts: number; statusCode?: number }
+        | {
+            failureKind: LlmFailureKind;
+            attempts: number;
+            retryable: boolean;
+            statusCode?: number;
+          }
         | undefined;
+      let retriesSpent = 0;
+      /** The hard cap the retry gate is bounded by. Never extended by a decision. */
+      const maxRetries = deps.decisionLayer.config.maxRetriesPerTask;
 
-      for (const step of attempt.steps) {
-        if (step.kind === "llm-failure") {
-          session = await deps.sessions.recordLlmFailure(active(), {
+      /**
+       * Bounded invocation loop: the first attempt plus at most `maxRetries` retries,
+       * each of which must survive the deterministic retry gate *and* the retry
+       * decision. There is no path through this loop that is not capped.
+       */
+      while (true) {
+        providerFailure = undefined;
+        let attempt: AgentAttempt;
+        try {
+          attempt = await deps.runner.attempt({
+            task: current.task,
+            workspace: deps.workspace,
             providerId: deps.providerId,
             modelId: deps.modelId,
-            messageCount: step.messageCount,
-            failureKind: step.failureKind,
-            attempts: step.attempts,
-            retryable: step.retryable,
-            ...(step.statusCode === undefined
-              ? {}
-              : { statusCode: step.statusCode }),
-            ...(step.latencyMs === undefined
-              ? {}
-              : { latencyMs: step.latencyMs }),
-            ...(step.contextSelectionId === undefined
-              ? {}
-              : { contextSelectionId: step.contextSelectionId }),
-            ...(step.contextSelectionVersion === undefined
-              ? {}
-              : { contextSelectionVersion: step.contextSelectionVersion }),
-            ...(step.contextSelectedTokens === undefined
-              ? {}
-              : { contextSelectedTokens: step.contextSelectedTokens }),
+            correlationId: decisionContext().correlationId,
+            context: selectedContext.bundle,
+            operations,
+            tools: toolPlan,
+            decisions: agentDecisions,
           });
-          providerFailure = {
-            failureKind: step.failureKind,
-            attempts: step.attempts,
-            ...(step.statusCode === undefined
-              ? {}
-              : { statusCode: step.statusCode }),
-          };
-          break;
-        }
-
-        if (step.kind === "llm") {
-          session = await deps.sessions.recordLlmCall(active(), {
-            providerId: deps.providerId,
-            modelId: deps.modelId,
-            messageCount: step.messageCount,
-            usage: step.usage,
-            usageReported: step.usageReported,
-            latencyMs: step.latencyMs,
-            retry: step.retry,
-            escalated: step.escalated,
-            ...(step.attempts === undefined ? {} : { attempts: step.attempts }),
-            ...(step.requestId === undefined
-              ? {}
-              : { requestId: step.requestId }),
-            ...(step.contextSelectionId === undefined
-              ? {}
-              : { contextSelectionId: step.contextSelectionId }),
-            ...(step.contextSelectionVersion === undefined
-              ? {}
-              : { contextSelectionVersion: step.contextSelectionVersion }),
-            ...(step.contextSelectedTokens === undefined
-              ? {}
-              : { contextSelectedTokens: step.contextSelectedTokens }),
-          });
-          llmRecords.push({
-            providerId: deps.providerId,
-            modelId: deps.modelId,
-            usage: step.usage,
-            usageReported: step.usageReported,
-            latencyMs: step.latencyMs,
-            retry: step.retry,
-            escalated: step.escalated,
-            ...(step.attempts === undefined ? {} : { attempts: step.attempts }),
-          });
-
-          // 4. Budget gate. Consumption is derived with the same accounting the
-          // metrics layer uses, so the running check and the reported numbers
-          // cannot diverge.
-          const inFlight = computeTaskMetrics({
-            taskId: current.task.id,
-            llmCalls: llmRecords,
-            toolCalls: 0,
-            iterations: llmRecords.filter((call) => call.retry === 0).length,
-            decisions: [],
-            startedAt: current.task.createdAt,
-            endedAt: current.task.createdAt,
-          });
-          const budget = evaluateBudget(current.task.budget, {
-            tokens: inFlight.totalTokens,
-            costMicros: pricedMicros(deps.rates, llmRecords),
-            durationMs: durationMsFrom(
-              active().startedAt,
-              toIsoString(deps.clock.now()),
-            ),
-            iterations: inFlight.iterations,
-            retries: inFlight.retries,
-          });
-          if (budget.level !== "ok") {
-            messages.push(
-              `budget ${budget.level}: ${budget.reasons.join("; ")}`,
-            );
-          }
-          if (budget.exceeded) {
-            // `reasons` already names the dimension, the ratio and the policy,
-            // so it is used verbatim rather than wrapped in a second summary.
-            budgetStop = budget.reasons.join("; ");
-            break;
-          }
-          continue;
-        }
-
-        if (step.kind === "tool") {
-          // 5. Per-step policy gate, evaluated before the step's result is accepted.
-          const policy = evaluatePolicy(deps.policy, {
-            operation: step.operation,
-            riskLevel: task.riskLevel,
-          });
-          await deps.decisions.record(
-            {
-              kind: "policy",
-              question:
-                `What policy effect applies to operation ` +
-                `"${step.operation}" for this task?`,
-              options: POLICY_OPTIONS,
-            },
-            {
-              outcome: "selected",
-              selectedOptionId: policy.effect,
-              decidedBy: "policy",
-              rationale: policy.reason,
-            },
-            decisionContext(active().id),
+        } catch (error) {
+          // An unexpected runtime error still has to leave an honest log: the
+          // session is closed as failed before the error is allowed to propagate.
+          const detail = isDomainError(error)
+            ? error.code
+            : error instanceof Error
+              ? error.name
+              : "unknown error";
+          const ended = await deps.sessions.end(
+            active(),
+            "failed",
+            `runtime error (${detail})`,
           );
+          messages.push(
+            `runtime error (${detail}); session ${ended.id} ended as failed`,
+          );
+          throw error;
+        }
+        messages.push(
+          `runner "${deps.runner.id}" (${deps.runner.kind}) reported ` +
+            `${attempt.steps.length} step(s)`,
+        );
 
-          if (policy.effect === "deny") {
-            policyStop = {
-              outcome: "policy-denied",
-              reason:
-                `policy denied operation "${step.operation}": ` + policy.reason,
+        for (const step of attempt.steps) {
+          if (step.kind === "llm-failure") {
+            session = await deps.sessions.recordLlmFailure(active(), {
+              providerId: deps.providerId,
+              modelId: deps.modelId,
+              messageCount: step.messageCount,
+              failureKind: step.failureKind,
+              attempts: step.attempts,
+              retryable: step.retryable,
+              ...(step.statusCode === undefined
+                ? {}
+                : { statusCode: step.statusCode }),
+              ...(step.contentPresence === undefined
+                ? {}
+                : { contentPresence: step.contentPresence }),
+              ...(step.latencyMs === undefined
+                ? {}
+                : { latencyMs: step.latencyMs }),
+              ...(step.contextSelectionId === undefined
+                ? {}
+                : { contextSelectionId: step.contextSelectionId }),
+              ...(step.contextSelectionVersion === undefined
+                ? {}
+                : { contextSelectionVersion: step.contextSelectionVersion }),
+              ...(step.contextSelectedTokens === undefined
+                ? {}
+                : { contextSelectedTokens: step.contextSelectedTokens }),
+            });
+            providerFailure = {
+              failureKind: step.failureKind,
+              attempts: step.attempts,
+              retryable: step.retryable,
+              ...(step.statusCode === undefined
+                ? {}
+                : { statusCode: step.statusCode }),
             };
             break;
           }
-          if (policy.effect === "require-approval") {
-            const gate = await resolveGate(
-              {
-                riskLevel: policy.effectiveRisk,
-                operation: step.operation,
-              },
-              `operation "${step.operation}" at effective risk "${policy.effectiveRisk}"`,
-              active().id,
+
+          if (step.kind === "llm") {
+            session = await deps.sessions.recordLlmCall(active(), {
+              providerId: deps.providerId,
+              modelId: deps.modelId,
+              messageCount: step.messageCount,
+              usage: step.usage,
+              usageReported: step.usageReported,
+              latencyMs: step.latencyMs,
+              retry: step.retry,
+              escalated: step.escalated,
+              ...(step.attempts === undefined
+                ? {}
+                : { attempts: step.attempts }),
+              ...(step.requestId === undefined
+                ? {}
+                : { requestId: step.requestId }),
+              ...(step.contextSelectionId === undefined
+                ? {}
+                : { contextSelectionId: step.contextSelectionId }),
+              ...(step.contextSelectionVersion === undefined
+                ? {}
+                : { contextSelectionVersion: step.contextSelectionVersion }),
+              ...(step.contextSelectedTokens === undefined
+                ? {}
+                : { contextSelectedTokens: step.contextSelectedTokens }),
+            });
+            llmRecords.push({
+              providerId: deps.providerId,
+              modelId: deps.modelId,
+              usage: step.usage,
+              usageReported: step.usageReported,
+              latencyMs: step.latencyMs,
+              retry: step.retry,
+              escalated: step.escalated,
+              ...(step.attempts === undefined
+                ? {}
+                : { attempts: step.attempts }),
+            });
+
+            // 4. Budget gate. Consumption is derived with the same accounting the
+            // metrics layer uses, so the running check and the reported numbers
+            // cannot diverge.
+            const inFlight = computeTaskMetrics({
+              taskId: current.task.id,
+              llmCalls: llmRecords,
+              toolCalls: 0,
+              iterations: llmRecords.filter((call) => call.retry === 0).length,
+              decisions: [],
+              startedAt: current.task.createdAt,
+              endedAt: current.task.createdAt,
+            });
+            const budget = evaluateBudget(current.task.budget, {
+              tokens: inFlight.totalTokens,
+              costMicros: pricedMicros(deps.rates, llmRecords),
+              durationMs: durationMsFrom(
+                active().startedAt,
+                toIsoString(deps.clock.now()),
+              ),
+              iterations: inFlight.iterations,
+              retries: inFlight.retries,
+            });
+            if (budget.level !== "ok") {
+              messages.push(
+                `budget ${budget.level}: ${budget.reasons.join("; ")}`,
+              );
+            }
+            if (budget.exceeded) {
+              // `reasons` already names the dimension, the ratio and the policy,
+              // so it is used verbatim rather than wrapped in a second summary.
+              budgetStop = budget.reasons.join("; ");
+              break;
+            }
+            continue;
+          }
+
+          if (step.kind === "tool") {
+            // 5. Contextual risk assessment, then the per-step policy gate.
+            //
+            // The deterministic baseline — the operation's inherent risk raised by the
+            // declared level — is computed first and passed *in*. A decision layer can
+            // raise the risk a policy gate sees; it can never lower it, and with no
+            // decision layer the assessment is the baseline, which is exactly the
+            // evaluation the platform performed before Phase G.
+            const baselineRisk = effectiveRiskLevel(
+              task.riskLevel,
+              step.operation,
             );
-            if (gate.kind === "suspended") {
+            const assessment = await coordinator.assessRisk({
+              operation: step.operation,
+              baselineRisk,
+            });
+            if (assessment.raised) {
+              messages.push(
+                `risk assessment raised "${step.operation}" from ${baselineRisk} to ` +
+                  `${assessment.effectiveRisk} (${describeDecisionAnswer(assessment.meta)}` +
+                  (assessment.reasonCode === undefined
+                    ? ")"
+                    : `, ${assessment.reasonCode})`),
+              );
+            }
+            const policy = evaluatePolicy(deps.policy, {
+              operation: step.operation,
+              riskLevel: assessment.effectiveRisk,
+            });
+            await deps.decisions.record(
+              {
+                kind: "policy",
+                question:
+                  `What policy effect applies to operation ` +
+                  `"${step.operation}" for this task?`,
+                options: POLICY_OPTIONS,
+              },
+              {
+                outcome: "selected",
+                selectedOptionId: policy.effect,
+                decidedBy: "policy",
+                rationale: policy.reason,
+              },
+              decisionContext(active().id),
+            );
+
+            if (policy.effect === "deny") {
               policyStop = {
-                outcome: "awaiting-approval",
-                reason: gate.reason,
-                requestId: gate.requestId,
+                outcome: "policy-denied",
+                reason:
+                  `policy denied operation "${step.operation}": ` +
+                  policy.reason,
               };
               break;
             }
+            if (policy.effect === "require-approval") {
+              const gate = await resolveGate(
+                {
+                  riskLevel: policy.effectiveRisk,
+                  operation: step.operation,
+                },
+                `operation "${step.operation}" at effective risk "${policy.effectiveRisk}"`,
+                active().id,
+              );
+              if (gate.kind === "suspended") {
+                policyStop = {
+                  outcome: "awaiting-approval",
+                  reason: gate.reason,
+                  requestId: gate.requestId,
+                };
+                break;
+              }
+            }
+
+            // 6. The enforcement layer's own answer, when it refused the operation.
+            //
+            // A refusal here is not a failed tool: the operation did not happen at
+            // all, and the gateway has already recorded why. A suspension is
+            // resumable; a denial is not, so the attempt stops rather than continuing
+            // with partial access and calling it a success.
+            if (step.refusal !== undefined) {
+              const detail =
+                `operation "${step.toolId}" was refused by the access boundary ` +
+                `(${step.refusal.reasonCode})`;
+              if (
+                step.refusal.requiresApproval &&
+                step.refusal.approvalRequestId !== undefined
+              ) {
+                policyStop = {
+                  outcome: "awaiting-approval",
+                  reason: `${detail}; approval required: ${step.refusal.approvalRequestId}`,
+                  requestId: step.refusal.approvalRequestId,
+                };
+                break;
+              }
+              policyStop = { outcome: "policy-denied", reason: detail };
+              break;
+            }
+
+            session = await deps.sessions.recordToolCall(active(), {
+              toolId: step.toolId,
+              operation: step.operation,
+              ok: step.ok,
+              latencyMs: step.latencyMs,
+            });
+            continue;
           }
-
-          session = await deps.sessions.recordToolCall(active(), {
-            toolId: step.toolId,
-            operation: step.operation,
-            ok: step.ok,
-            latencyMs: step.latencyMs,
+          session = await deps.sessions.recordTestRun(active(), {
+            suite: step.suite,
+            passed: step.passed,
+            failed: step.failed,
+            durationMs: step.durationMs,
           });
-          continue;
+          verificationChecks += step.passed + step.failed;
+          verificationFailures += step.failed;
+          if (step.failed > 0) {
+            verificationFailure =
+              `verification suite "${step.suite}" reported ` +
+              `${step.failed} failing check(s)`;
+          }
         }
 
-        session = await deps.sessions.recordTestRun(active(), {
-          suite: step.suite,
-          passed: step.passed,
-          failed: step.failed,
-          durationMs: step.durationMs,
-        });
-        if (step.failed > 0) {
-          verificationFailure =
-            `verification suite "${step.suite}" reported ` +
-            `${step.failed} failing check(s)`;
+        // Retry: the decision layer may recommend, deterministic code decides. The
+        // caps below are hard inputs to the question, not hints it may exceed.
+        if (providerFailure === undefined) {
+          break;
         }
+        const budgetRetries = current.task.budget.maxRetries;
+        const retriesRemaining = Math.max(
+          0,
+          (budgetRetries ?? maxRetries) - retriesSpent,
+        );
+        const retry = await coordinator.shouldRetry({
+          failureKind: providerFailure.failureKind,
+          retryable: providerFailure.retryable,
+          attemptsSpent: retriesSpent,
+          retriesRemaining,
+        });
+        messages.push(
+          `retry decision: ${retry.action} (${describeDecisionAnswer(retry.meta)}` +
+            (retry.reasonCode === undefined ? ")" : `, ${retry.reasonCode})`),
+        );
+        if (retry.action !== "retry") {
+          if (retry.action === "escalate") {
+            const escalation = await coordinator.recommendEscalation({
+              facts: [`provider:${providerFailure.failureKind}`],
+              securityRefusal: false,
+            });
+            messages.push(
+              `escalation recommendation: ${escalation.recommendation} ` +
+                `(${describeDecisionAnswer(escalation.meta)})`,
+            );
+          }
+          break;
+        }
+        retriesSpent += 1;
+        messages.push(
+          `re-running the attempt (${retriesSpent}/${maxRetries}) after a ` +
+            `"${providerFailure.failureKind}" failure`,
+        );
       }
 
       if (providerFailure !== undefined) {
@@ -700,6 +1045,8 @@ export function createRunTask(deps: RunTaskDeps): RunTask {
           reason,
           messages,
           resumed: resumedRun,
+          route: routeDecision.routeId,
+          retriesSpent,
         };
       }
 
@@ -712,6 +1059,18 @@ export function createRunTask(deps: RunTaskDeps): RunTask {
         if (policyStop.outcome === "policy-denied") {
           // A denial cannot be waited out, so the task fails. An approval request
           // can, so the task is left exactly where it is.
+          //
+          // A refusal by the enforcement boundary is answered by the escalation gate
+          // in code, without consulting a provider: a security refusal is never
+          // delegated to a decision layer (ADR-053).
+          const escalation = await coordinator.recommendEscalation({
+            facts: ["operation:denied"],
+            securityRefusal: true,
+          });
+          messages.push(
+            `escalation recommendation: ${escalation.recommendation} ` +
+              `(${escalation.reasonCode ?? describeDecisionAnswer(escalation.meta)})`,
+          );
           current = await deps.tasks.fail(current, policyStop.reason);
           return {
             outcome: policyStop.outcome,
@@ -720,6 +1079,8 @@ export function createRunTask(deps: RunTaskDeps): RunTask {
             reason: policyStop.reason,
             messages,
             resumed: resumedRun,
+            route: routeDecision.routeId,
+            escalation: escalation.recommendation,
           };
         }
         messages.push(
@@ -745,13 +1106,21 @@ export function createRunTask(deps: RunTaskDeps): RunTask {
       current = await deps.tasks.transition(current, "verification");
 
       if (verificationFailure !== undefined) {
+        const escalation = await coordinator.recommendEscalation({
+          facts: ["verification:failed"],
+          securityRefusal: false,
+        });
         session = await deps.sessions.end(
           active(),
           "failed",
           verificationFailure,
         );
         current = await deps.tasks.fail(current, verificationFailure);
-        messages.push(verificationFailure);
+        messages.push(
+          verificationFailure,
+          `escalation recommendation: ${escalation.recommendation} ` +
+            `(${describeDecisionAnswer(escalation.meta)})`,
+        );
         return {
           outcome: "verification-failed",
           task: current.task,
@@ -759,7 +1128,43 @@ export function createRunTask(deps: RunTaskDeps): RunTask {
           reason: verificationFailure,
           messages,
           resumed: resumedRun,
+          route: routeDecision.routeId,
+          escalation: escalation.recommendation,
+          retriesSpent,
         };
+      }
+
+      /**
+       * Completion assessment: an assessment, not a proof.
+       *
+       * The task state machine stays deterministic — a success still ends in `review`,
+       * which a human closes — so the worst a decision layer can do here is add
+       * context to the human's decision. Nothing below depends on this answer
+       * (ADR-054).
+       */
+      const completion = await coordinator.assessCompletion({
+        acceptanceCriteriaTotal: current.task.acceptanceCriteria.length,
+        verificationChecks,
+        verificationFailures,
+      });
+      messages.push(
+        `completion assessment: ${completion.assessment} ` +
+          `(${describeDecisionAnswer(completion.meta)}` +
+          (completion.reasonCode === undefined
+            ? ")"
+            : `, ${completion.reasonCode})`),
+      );
+      let escalationRecommendation: EscalationRecommendationId | undefined;
+      if (completion.assessment !== "complete") {
+        const escalation = await coordinator.recommendEscalation({
+          facts: [`completion:${completion.assessment}`],
+          securityRefusal: false,
+        });
+        escalationRecommendation = escalation.recommendation;
+        messages.push(
+          `a human decides whether this task is complete; escalation recommendation: ` +
+            `${escalation.recommendation} (${describeDecisionAnswer(escalation.meta)})`,
+        );
       }
 
       session = await deps.sessions.end(active(), "completed");
@@ -773,6 +1178,12 @@ export function createRunTask(deps: RunTaskDeps): RunTask {
         session,
         messages,
         resumed: resumedRun,
+        route: routeDecision.routeId,
+        completionAssessment: completion.assessment,
+        ...(escalationRecommendation === undefined
+          ? {}
+          : { escalation: escalationRecommendation }),
+        retriesSpent,
       };
     },
   };

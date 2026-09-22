@@ -98,6 +98,9 @@ export function createRetryingProvider(
                 ...(error.statusCode === undefined
                   ? {}
                   : { statusCode: error.statusCode }),
+                ...(error.contentPresence === undefined
+                  ? {}
+                  : { contentPresence: error.contentPresence }),
                 ...(error.retryAfterMs === undefined
                   ? {}
                   : { retryAfterMs: error.retryAfterMs }),

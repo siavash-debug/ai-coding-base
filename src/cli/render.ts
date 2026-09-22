@@ -1,13 +1,33 @@
 import type { ApprovalState } from "../application/approval-ledger.js";
 import type { DoctorReport } from "../application/doctor.js";
 import { formatDoctorReport } from "../application/doctor.js";
+import type { PolicyCheckOutcome } from "../application/policy-check.js";
 import type { RunTaskResult } from "../application/run-task.js";
-import type { TaskTrace, TraceContextSelection } from "../application/trace.js";
+import type {
+  TaskTrace,
+  TraceContextSelection,
+  TraceDecision,
+} from "../application/trace.js";
+import type { DecisionEngineInfo } from "../decisions/engine.js";
+import { describeFallbacks } from "../decisions/fallback.js";
+import type {
+  DecisionConfig,
+  FrontierConfig,
+} from "../adapters/config/project-config.js";
+import type { ModelRegistry } from "../models/registry.js";
+import type { OrchestrationResult } from "../orchestration/orchestrator.js";
 import type { ContextSelection } from "../context/selection.js";
 import { SIGNAL_LABELS as CONTEXT_SIGNAL_LABELS } from "../context/scoring.js";
 import { type Cost, formatCost } from "../observability/cost.js";
 import type { BudgetEvaluation } from "../observability/budget.js";
-import type { TaskMetrics } from "../observability/metrics.js";
+import {
+  type TaskMetrics,
+  formatDecisionCost,
+} from "../observability/metrics.js";
+import {
+  type AccessPolicy,
+  describePolicyCapabilities,
+} from "../policy/access-policy.js";
 import type { StoredTask } from "../ports/task-repository.js";
 
 /**
@@ -326,6 +346,12 @@ export function formatTrace(trace: TaskTrace): string {
     "CONTEXT",
     ...contextLines(trace),
     "",
+    "POLICY",
+    ...policyLines(trace),
+    "",
+    "OPERATIONS",
+    ...operationLines(trace),
+    "",
     "DECISIONS",
     ...decisionLines(trace),
     "",
@@ -387,6 +413,140 @@ function contextLines(trace: TaskTrace): readonly string[] {
   return lines;
 }
 
+/**
+ * The enforcement section of a trace: what was authorised, what was asked, what
+ * happened and what was refused.
+ *
+ * Reads the projection rather than re-deriving anything, so it cannot disagree with
+ * the log or with `ai policy`. The declared envelope is printed per attempt because
+ * that is the authority every check below it was evaluated against: reading a check
+ * against today's policy would make an old denial look wrong.
+ */
+function policyLines(trace: TaskTrace): readonly string[] {
+  if (
+    trace.policy.envelopes.length === 0 &&
+    trace.policy.checks.length === 0 &&
+    trace.policy.operations.length === 0 &&
+    trace.policy.refusals.length === 0
+  ) {
+    return ["  (no enforcement events recorded)"];
+  }
+  const lines: string[] = [];
+  for (const envelope of trace.policy.envelopes) {
+    lines.push(
+      `  declared  ${envelope.policyId} v${envelope.policyVersion}: ` +
+        (envelope.capabilities.length === 0
+          ? "no capability"
+          : envelope.capabilities.join(", ")),
+    );
+  }
+  for (const check of trace.policy.checks) {
+    lines.push(
+      `  check     ${check.capability} ${check.targetKind} ${check.target} ` +
+        `-> ${check.decision} (${check.reasonCode})` +
+        (check.approvalRequestId === undefined
+          ? ""
+          : ` approval ${check.approvalRequestId}`),
+    );
+  }
+  for (const refusal of trace.policy.refusals) {
+    lines.push(
+      `  refused   ${refusal.capability} ${refusal.targetKind} ${refusal.target} ` +
+        `(${refusal.reasonCode}${refusal.fromSandbox ? ", sandbox" : ""})`,
+    );
+  }
+  return lines;
+}
+
+function operationLines(trace: TaskTrace): readonly string[] {
+  if (trace.policy.operations.length === 0) {
+    return ["  (none)"];
+  }
+  return trace.policy.operations.map((operation) => {
+    // The result is reported by *size in its own unit*, never by content: bytes for
+    // a read, entry count for a listing, HTTP status for a request.
+    const size =
+      operation.resultSize === undefined ? "" : ` size ${operation.resultSize}`;
+    const timedOut = operation.timedOut === true ? " timed out" : "";
+    return (
+      `  ${operation.operationId}  ${operation.capability} ` +
+      `${operation.target ?? ""} ${operation.outcome} in ` +
+      `${formatDuration(operation.durationMs ?? 0)}${size}${timedOut}`
+    );
+  });
+}
+
+/** What policy permits, in one place, without evaluating anything. */
+export function formatAccessPolicy(
+  policy: AccessPolicy,
+  envelope: readonly string[],
+  sandboxId: string,
+): string {
+  const list = (values: readonly string[], empty = "(none)"): string =>
+    values.length === 0 ? empty : values.join(", ");
+  return [
+    `Access policy ${policy.id} v${policy.version}  (sandbox ${sandboxId})`,
+    "",
+    "CAPABILITIES",
+    ...describePolicyCapabilities(policy).map(
+      (row) => `  ${row.capability.padEnd(20)}${row.effect}`,
+    ),
+    "",
+    "FILESYSTEM",
+    `  readable roots    ${list(policy.filesystem.readableRoots)}`,
+    `  writable roots    ${list(policy.filesystem.writableRoots)}`,
+    `  denied patterns   ${list(policy.filesystem.deniedPatterns)}`,
+    "",
+    "PROCESS",
+    `  allowed commands  ${list(policy.process.allowedCommands)}`,
+    `  denied commands   ${list(policy.process.deniedCommands)}`,
+    `  max timeout       ${formatCount(policy.process.maxTimeoutMs)}ms`,
+    `  child environment ${list(policy.process.environmentAllowlist)}`,
+    "",
+    "NETWORK",
+    `  enabled           ${policy.network.enabled ? "yes" : "no"}`,
+    `  operation hosts   ${list(policy.network.allowedHosts)}`,
+    `  provider hosts    ${list(policy.network.providerHosts)}`,
+    "",
+    "ENVIRONMENT",
+    `  allowed variables ${list(policy.environment.allowedVariables)}`,
+    `  denied patterns   ${list(policy.environment.deniedPatterns)}`,
+    "",
+    "ENVELOPE FOR AN ATTEMPT",
+    `  ${list(envelope, "none — no operation can be performed")}`,
+  ].join("\n");
+}
+
+/** The one-line-per-check rendering of a dry run. */
+export function formatAccessCheck(
+  outcome: PolicyCheckOutcome,
+  capability: string,
+  target: string,
+): string {
+  if (outcome.refused !== undefined) {
+    return [
+      `check ${capability} ${target}`,
+      `  refused   ${outcome.refused.reasonCode}: ${outcome.refused.reason}`,
+    ].join("\n");
+  }
+  const result = outcome.result;
+  if (result === undefined) {
+    return `check ${capability} ${target}\n  refused   nothing was evaluated`;
+  }
+  return [
+    `check ${result.capability} ${result.targetKind} ${result.target}`,
+    `  status         ${result.status}`,
+    `  reason         ${result.reasonCode}: ${result.reason}`,
+    `  operation      ${result.operation} (risk ${result.riskLevel})` +
+      (result.requiresApproval ? ", human approval required" : ""),
+    `  evaluated by   ${result.fromSandbox ? "the sandbox boundary" : "policy"}`,
+    ...(result.matchedRule === undefined
+      ? []
+      : [`  matched rule   ${result.matchedRule}`]),
+    `  policy         ${result.policyId} v${result.policyVersion}`,
+  ].join("\n");
+}
+
 export function formatMetricsLines(metrics: TaskMetrics): readonly string[] {
   return [
     `  input tokens    ${formatCount(metrics.inputTokens)}`,
@@ -400,7 +560,9 @@ export function formatMetricsLines(metrics: TaskMetrics): readonly string[] {
     `  iterations      ${formatCount(metrics.iterations)}`,
     `  retries         ${formatCount(metrics.retries)}`,
     `  escalations     ${formatCount(metrics.escalations)}`,
-    `  decisions       ${formatCount(metrics.decisions)} (${formatCount(metrics.decisionsByProvider)} by decision provider)`,
+    // The same partition `ai task usage` reports: provider, deterministic and
+    // fallback answers add up to the recorded total.
+    `  decisions       ${formatCount(metrics.decisions)} (${formatCount(metrics.decisionsByProvider)} provider, ${formatCount(metrics.decisionsDeterministic)} deterministic, ${formatCount(metrics.decisionFallbacks)} fallback)`,
     `  duration        ${metrics.open ? "open" : formatDuration(metrics.durationMs)}`,
   ];
 }
@@ -694,6 +856,306 @@ export function formatTaskContext(
     .join("\n\n");
 }
 
+/**
+ * One decision, as a line.
+ *
+ * The `answered by` column is the point of the whole section: it says whether code,
+ * a provider or a fallback answered, and a fallback names the reason. Reading this
+ * column is how an operator notices that the decision layer was down.
+ */
+function decisionAnswerLabel(decision: TraceDecision): string {
+  switch (decision.answeredBy) {
+    case "provider":
+      return `provider ${decision.providerId ?? "unknown"}`;
+    case "fallback":
+      return `fallback: ${decision.fallbackReason ?? "unknown"}`;
+    case "deterministic":
+      return decision.reasonCode ?? "deterministic";
+    default:
+      return decision.decidedBy ?? "unknown";
+  }
+}
+
+/**
+ * Pads a column, but never lets a wide value run into the column after it.
+ *
+ * `padEnd` only *pads*: a value longer than its column silently swallows the gap,
+ * which is how a ranked candidate list ended up glued to the answer column.
+ */
+function column(value: string, width: number): string {
+  return value.length >= width ? `${value} ` : value.padEnd(width);
+}
+
+/**
+ * `ai task decisions`: every bounded question this task asked, and how it was
+ * answered.
+ *
+ * Presentation only, and deliberately no filtering: a decision that answered
+ * "nothing to do" is as interesting as one that chose a tool.
+ */
+export function formatTaskDecisions(trace: TaskTrace): string {
+  const lines = [
+    `Task ${trace.taskId}  ${formatCount(trace.decisions.length)} decision(s), ` +
+      `${formatCount(trace.decisionFailures.length)} failed consultation(s)`,
+    `  status          ${trace.status}`,
+    "",
+  ];
+  if (trace.decisions.length === 0) {
+    lines.push("  no decisions recorded for this task.");
+  }
+  for (const decision of trace.decisions) {
+    const selected = decision.ranking
+      ? `${decision.ranking.join(" > ")}`
+      : (decision.selectedOptionId ?? decision.outcome);
+    lines.push(
+      `  ${decision.kind.padEnd(18)}${String(decision.outcome).padEnd(10)}` +
+        `${column(selected, 28)}${decisionAnswerLabel(decision)}`,
+    );
+    if (decision.question !== undefined) {
+      lines.push(`  ${"".padEnd(18)}${decision.question}`);
+    }
+    if (decision.optionIds !== undefined && decision.optionIds.length > 0) {
+      lines.push(
+        `  ${"".padEnd(18)}candidates: ${decision.optionIds.join(", ")}`,
+      );
+    }
+    if (decision.providerFailureKind !== undefined) {
+      lines.push(
+        `  ${"".padEnd(18)}provider failure: ${decision.providerFailureKind}`,
+      );
+    }
+    if (decision.usage !== undefined) {
+      lines.push(
+        `  ${"".padEnd(18)}tokens: ${formatCount(
+          decision.usage.inputTokens +
+            decision.usage.outputTokens +
+            decision.usage.cachedInputTokens,
+        )}` +
+          (decision.cost === undefined
+            ? "  (unpriced)"
+            : `  cost: ${formatCost(decision.cost)}`),
+      );
+    }
+  }
+  for (const failure of trace.decisionFailures) {
+    lines.push(
+      `  ${failure.kind.padEnd(18)}FAILED     provider ${failure.providerId} (${failure.failureKind}, ${failure.attempts} attempt(s))`,
+    );
+  }
+  if (trace.metrics.decisions > 0) {
+    lines.push(
+      "",
+      `  decision latency ${formatCount(trace.metrics.decisionLatencyMs)}ms  ` +
+        `tokens ${formatCount(trace.metrics.decisionTokens)}  ` +
+        // The same phrasing `ai task usage` uses: one function decides how an
+        // incomplete total is described.
+        `cost ${formatDecisionCost(trace.metrics)}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+/**
+ * `ai decision`: what the decision layer is, and what it has decided here.
+ *
+ * Offline by construction: it reports configuration, capability and recorded
+ * counts, and never calls a provider. Verifying that a decision service answers is
+ * what `ai doctor` cannot do without spending money, so this command reports only
+ * what can be known so far.
+ */
+export function formatDecisionLayer(input: {
+  readonly config: DecisionConfig;
+  readonly info: DecisionEngineInfo;
+  readonly counts: Readonly<Record<string, number>>;
+  readonly decisions: number;
+  readonly failures: number;
+  readonly fallbacks: number;
+  readonly deterministic: number;
+  readonly providerAnswers: number;
+}): string {
+  const configured = input.info.configured;
+  const lines = [
+    "Decision layer",
+    `  provider        ${configured ? `"${input.info.providerId}" (${input.info.providerFamily ?? "unknown"})` : `disabled (${input.config.provider})`}`,
+    `  configured      ${configured ? (input.info.deterministic === true ? "deterministic provider" : "non-deterministic provider") : "no decision engine installed for this project"}`,
+    `  budget          ${input.config.maxDecisionsPerTask} consultation(s) per task, up to ${input.config.maxRetriesPerTask} attempt-level retr(ies)`,
+    `  kinds offered   ${(input.info.kinds ?? []).join(", ") || "(none)"}`,
+    `  answers refused ${input.failures} failed consultation(s), ${input.fallbacks} fallback answer(s)`,
+    "",
+    `  recorded here   ${formatCount(input.decisions)} decision(s): ` +
+      `${formatCount(input.providerAnswers)} provider, ` +
+      `${formatCount(input.deterministic)} deterministic, ` +
+      `${formatCount(input.fallbacks)} fallback`,
+  ];
+  const kinds = Object.entries(input.counts);
+  for (const [kind, count] of kinds) {
+    lines.push(`    ${kind.padEnd(18)}${formatCount(count)}`);
+  }
+  if (kinds.length === 0) {
+    lines.push("    (no decisions recorded in this workspace scope yet)");
+  }
+  lines.push("", "Fallback policy (deterministic, one strategy per question):");
+  for (const fallback of describeFallbacks()) {
+    lines.push(`  ${fallback.domain.padEnd(18)}${fallback.description}`);
+  }
+  return lines.join("\n");
+}
+
 export function formatDoctor(report: DoctorReport): string {
   return formatDoctorReport(report);
+}
+
+/**
+ * One orchestrated run, as a human reads it.
+ *
+ * Model, usage, cost and reason are all present because they are what makes the run
+ * auditable; the *content* of any step is never shown, because it is not recorded and
+ * is not part of this command's contract.
+ */
+export function formatOrchestration(result: OrchestrationResult): string {
+  const lines = [
+    `Strategy  ${result.strategy}`,
+    `Plan      ${result.planId} (${result.planReasonCode})`,
+    ...(result.variantReasonCode === undefined
+      ? []
+      : [
+          `Variant   chosen from ${result.variantsOffered.join(", ")} (${result.variantReasonCode}, ${result.variantAnsweredBy ?? "unknown"})`,
+        ]),
+    `Task      ${result.taskId}`,
+    `Session   ${result.sessionId}`,
+    `Risk      ${result.requirements.risk} (${result.requirements.complexity}); ` +
+      `classified as ${result.requirements.classifications.join(", ")}`,
+    `Requires  ${result.requirements.modelRequirements.requiredCapabilities.join(", ") || "nothing model-specific"}`,
+    `Eligible  ${result.eligibleModelIds.join(", ") || "(none)"}`,
+    `Calls     ${result.callsSpent} (${result.retriesSpent} retr(ies))${
+      result.parallel ? ", parallel" : ""
+    }`,
+    `Tokens    ${formatCount(result.usage.inputTokens)} in / ` +
+      `${formatCount(result.usage.outputTokens)} out / ` +
+      `${formatCount(result.usage.inputTokens + result.usage.outputTokens)} total`,
+    `Cost      ${result.costMicros === undefined ? "unpriced" : formatCost({ micros: result.costMicros, currency: "USD" })}` +
+      (result.unpricedCalls === 0
+        ? ""
+        : ` (${formatCount(result.unpricedCalls)} unpriced call(s))`),
+    `Duration  ${formatCount(result.durationMs)}ms`,
+    `Budget    ${result.budgetLevel}`,
+    ...(result.stopReason === undefined
+      ? []
+      : [`Stopped   ${result.stopReason}`]),
+    `Complete  ${result.completionAssessment} (an assessment, not a state change)`,
+    `Escalate  ${result.escalationRecommendation}${result.needsHumanReview ? " — human review required" : ""}`,
+    "",
+    "Steps:",
+  ];
+  if (result.steps.length === 0) {
+    lines.push("  (no model call was needed)");
+  }
+  for (const step of result.steps) {
+    lines.push(
+      `  ${step.stepId}  ${step.purpose}  ${step.status}` +
+        (step.modelId === "" ? "" : `  ${step.modelId} (${step.providerId})`) +
+        (step.failureKind === undefined ? "" : `  failed: ${step.failureKind}`),
+    );
+    lines.push(
+      `    retry ${formatCount(step.retry)}, attempts ${formatCount(step.attempts)}, ` +
+        `${formatCount(step.latencyMs)}ms` +
+        (step.usageReported && step.usage !== undefined
+          ? `, ${formatCount(step.usage.inputTokens + step.usage.outputTokens)} token(s)`
+          : ", usage not reported") +
+        (step.costMicros === undefined
+          ? ", unpriced"
+          : `, ${formatCost({ micros: step.costMicros, currency: "USD" })}`) +
+        (step.selectionReasonCode === undefined
+          ? ""
+          : `, reason ${step.selectionReasonCode}`),
+    );
+    if (
+      step.rankedCandidates !== undefined &&
+      step.rankedCandidates.length > 1
+    ) {
+      lines.push(`    candidates: ${step.rankedCandidates.join(" > ")}`);
+    }
+  }
+  if (result.rejectedModels.length > 0) {
+    lines.push("", "Rejected:");
+    for (const rejection of result.rejectedModels) {
+      lines.push(
+        `  ${rejection.modelId}  ${rejection.reasonCode}` +
+          (rejection.missing.length === 0
+            ? ""
+            : ` (${rejection.missing.join(", ")})`),
+      );
+    }
+  }
+  return lines.join("\n");
+}
+
+/**
+ * The model catalog, as an operator reads it.
+ *
+ * Capabilities are shown because they are the *declared* inputs to routing: an
+ * operator who disagrees with a routing choice should be able to see, without
+ * reading code, what the platform believes each model can do.
+ */
+export function formatFrontierModels(input: {
+  readonly registry: ModelRegistry;
+  readonly config: FrontierConfig;
+  readonly providers: readonly string[];
+}): string {
+  const reachable = new Set(input.providers);
+  const lines = [
+    `Routing   ${input.config.enabled ? "enabled" : "disabled (no model call will be made)"}  mode ${input.config.routing.mode}`,
+    `Bounds    ${input.config.routing.maxModelCalls} call(s), ` +
+      `${input.config.routing.maxRetriesPerStep} retr(ies) per step, ` +
+      `decomposition ${input.config.routing.allowDecomposition ? "allowed" : "off"}, parallel ${input.config.routing.allowParallel ? "allowed" : "off"}`,
+    "",
+    "Models:",
+  ];
+  for (const model of input.registry.list()) {
+    const operational = model.operational;
+    lines.push(
+      `  ${model.modelId}  [${model.providerId}]  ${model.enabled ? "enabled" : "disabled"}  ${model.health}` +
+        (model.role === undefined ? "" : `  role ${model.role}`) +
+        (operational?.status === undefined ? "" : `  ${operational.status}`) +
+        (model.userOwned ? "  (operator-added)" : "") +
+        (reachable.has(model.providerId) ? "" : "  (provider not configured)"),
+    );
+    lines.push(
+      `    ${model.displayName}; capabilities: ${model.capabilities.join(", ") || "none"}; ` +
+        `in: ${model.inputModalities.join("+") || "none"}; out: ${model.outputModalities.join("+") || "none"}; ` +
+        `latency ${model.latencyClass}; priority ${model.priority}` +
+        (model.contextLimit === undefined
+          ? ""
+          : `; context ${formatCount(model.contextLimit)}`) +
+        (model.specializations === undefined
+          ? ""
+          : `; specializations ${model.specializations.join(", ")}`) +
+        // Tier and lifecycle are only printed when declared, so an unknown never
+        // reads as a fact on an operator's screen either.
+        (operational?.free === undefined
+          ? ""
+          : operational.free
+            ? "; free tier"
+            : "; paid tier") +
+        (operational?.sunsetAt === undefined
+          ? ""
+          : `; ends ${operational.sunsetAt}`) +
+        (operational?.rateLimitClass === undefined
+          ? ""
+          : `; rate limit class ${operational.rateLimitClass}`),
+    );
+  }
+  lines.push("", "Providers:");
+  for (const provider of input.config.providers) {
+    const models = input.config.models.filter(
+      (model) => model.providerId === provider.id,
+    );
+    lines.push(
+      `  ${provider.id}  ${provider.kind}  ${provider.baseUrl}  ` +
+        `credential ${provider.credentialEnvVar}  ` +
+        `${models.length} model(s)  ` +
+        `${reachable.has(provider.id) ? "adapter built" : "not constructed"}`,
+    );
+  }
+  return lines.join("\n");
 }

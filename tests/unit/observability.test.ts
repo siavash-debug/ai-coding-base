@@ -675,7 +675,13 @@ describe("task metrics", () => {
       "Iterations: 7",
       "Retries: 1",
       "Escalations: 2",
-      "Decisions: 3 (2 by decision provider)",
+      // The three answer sources partition the decisions, so they add up to the
+      // total; the decision cost line admits what it cannot price instead of
+      // reporting an incomplete total as if it were the whole story.
+      "Decisions: 3 (2 by decision provider, 1 deterministic, 0 fallback)",
+      "Decision latency: 0ms",
+      "Decision tokens: 0",
+      "Decision cost: $0 (lower bound; 2 unpriced; 2 without usage)",
       "Duration: 47m 0s",
     ]);
   });

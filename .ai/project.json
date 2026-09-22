@@ -1,0 +1,591 @@
+{
+  "schemaVersion": 1,
+  "project": {
+    "id": "b402fe86-f4f1-4630-bd51-40a6185c2540",
+    "name": "AI Coding Base",
+    "slug": "ai-coding-base",
+    "rootPath": "C:\\Users\\theex\\Documents\\Projects\\ai-coding-base",
+    "status": "active",
+    "createdAt": "2026-09-21T09:47:18.763Z",
+    "updatedAt": "2026-09-21T09:47:18.763Z"
+  },
+  "workspaces": [
+    {
+      "id": "8427cbf4-26ba-4893-b190-68b1e0d59d29",
+      "projectId": "b402fe86-f4f1-4630-bd51-40a6185c2540",
+      "name": "default",
+      "rootPath": "C:\\Users\\theex\\Documents\\Projects\\ai-coding-base",
+      "isolation": {
+        "filesystem": {
+          "mode": "scoped",
+          "enforcement": "declared"
+        },
+        "git": {
+          "mode": "scoped",
+          "enforcement": "declared"
+        },
+        "processes": {
+          "mode": "process",
+          "enforcement": "declared"
+        },
+        "dependencies": {
+          "mode": "scoped",
+          "enforcement": "declared"
+        },
+        "environment": {
+          "mode": "scoped",
+          "enforcement": "declared"
+        },
+        "secrets": {
+          "mode": "scoped",
+          "enforcement": "declared"
+        },
+        "network": {
+          "mode": "none",
+          "enforcement": "declared"
+        },
+        "aiContext": {
+          "mode": "scoped",
+          "enforcement": "declared"
+        },
+        "aiMemory": {
+          "mode": "scoped",
+          "enforcement": "declared"
+        },
+        "taskHistory": {
+          "mode": "scoped",
+          "enforcement": "declared"
+        },
+        "telemetry": {
+          "mode": "scoped",
+          "enforcement": "declared"
+        },
+        "resourceLimits": {
+          "mode": "scoped",
+          "enforcement": "declared"
+        }
+      },
+      "status": "ready",
+      "createdAt": "2026-09-21T09:47:18.765Z",
+      "updatedAt": "2026-09-21T09:47:18.765Z"
+    }
+  ],
+  "modelRates": [
+    {
+      "providerId": "deterministic",
+      "modelId": "deterministic-1",
+      "currency": "USD",
+      "inputMicrosPerMillionTokens": 3000000,
+      "outputMicrosPerMillionTokens": 15000000,
+      "cachedInputMicrosPerMillionTokens": 300000,
+      "effectiveFrom": "2026-01-01T00:00:00.000Z"
+    }
+  ],
+  "llm": {
+    "provider": "simulated"
+  },
+  "context": {
+    "strategy": "deterministic",
+    "version": 1,
+    "maxTokens": 8000,
+    "bytesPerToken": 4,
+    "maxFileTokens": 3000,
+    "useGitChanges": true,
+    "includeTests": true,
+    "includeDocumentation": true,
+    "includeAdr": true,
+    "exclusions": [],
+    "priority": []
+  },
+  "policy": {
+    "id": "policy-access-default",
+    "version": 1,
+    "capabilities": {
+      "allowed": [
+        "filesystem.read",
+        "git.read"
+      ],
+      "denied": [],
+      "requireApproval": []
+    },
+    "filesystem": {
+      "readableRoots": [
+        "."
+      ],
+      "writableRoots": [],
+      "deniedPatterns": []
+    },
+    "process": {
+      "allowedCommands": [],
+      "deniedCommands": [],
+      "maxTimeoutMs": 60000,
+      "environmentAllowlist": []
+    },
+    "network": {
+      "enabled": false,
+      "allowedHosts": [],
+      "providerHosts": [
+        "api.typesafe.ai",
+        "openrouter.ai"
+      ]
+    },
+    "environment": {
+      "allowedVariables": [],
+      "deniedPatterns": []
+    }
+  },
+  "decision": {
+    "provider": "typesafe",
+    "credentialEnvVar": "TYPESAFE_API_KEY",
+    "maxDecisionsPerTask": 6,
+    "maxRetriesPerTask": 1,
+    "timeoutMs": 30000
+  },
+  "frontier": {
+    "enabled": true,
+    "providers": [
+      {
+        "id": "openrouter",
+        "kind": "openai-compatible",
+        "baseUrl": "https://openrouter.ai/api/v1",
+        "credentialEnvVar": "OPENROUTER_API_KEY",
+        "maxAttempts": 1,
+        "timeoutMs": 60000
+      }
+    ],
+    "models": [
+      {
+        "modelId": "inclusionai/ling-3.0-flash-fin:free",
+        "providerId": "openrouter",
+        "displayName": "Ling 3.0 Flash Fin (OpenRouter, free tier)",
+        "capabilities": [
+          "general",
+          "reasoning",
+          "coding",
+          "toolCalling",
+          "structuredOutput",
+          "fastInference"
+        ],
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "toolCalling": true,
+        "structuredOutput": true,
+        "latencyClass": "fast",
+        "priority": 10,
+        "enabled": true,
+        "userOwned": false,
+        "health": "unknown",
+        "operational": {
+          "free": true,
+          "status": "active"
+        }
+      },
+      {
+        "modelId": "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "providerId": "openrouter",
+        "displayName": "Nemotron 3 Ultra 550B A55B (OpenRouter, free tier)",
+        "capabilities": [
+          "general",
+          "reasoning",
+          "coding"
+        ],
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "latencyClass": "standard",
+        "priority": 0,
+        "enabled": true,
+        "userOwned": false,
+        "health": "unknown",
+        "operational": {
+          "free": true,
+          "status": "active"
+        }
+      },
+      {
+        "modelId": "poolside/laguna-s-2.1:free",
+        "providerId": "openrouter",
+        "displayName": "Laguna S 2.1 (OpenRouter, free tier)",
+        "capabilities": [
+          "general",
+          "reasoning",
+          "coding"
+        ],
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "latencyClass": "standard",
+        "priority": 0,
+        "enabled": true,
+        "userOwned": false,
+        "health": "unknown",
+        "operational": {
+          "free": true,
+          "status": "active"
+        }
+      },
+      {
+        "modelId": "nvidia/nemotron-3.5-lightning:free",
+        "providerId": "openrouter",
+        "displayName": "Nemotron 3.5 Lightning (OpenRouter, free tier)",
+        "capabilities": [
+          "general",
+          "reasoning",
+          "coding"
+        ],
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "latencyClass": "standard",
+        "priority": 0,
+        "enabled": true,
+        "userOwned": false,
+        "health": "unknown",
+        "operational": {
+          "free": true,
+          "status": "active"
+        }
+      },
+      {
+        "modelId": "cohere/north-mini-code:free",
+        "providerId": "openrouter",
+        "displayName": "North Mini Code (OpenRouter, free tier)",
+        "capabilities": [
+          "general",
+          "reasoning",
+          "coding"
+        ],
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "latencyClass": "standard",
+        "priority": 0,
+        "enabled": true,
+        "userOwned": false,
+        "health": "unknown",
+        "operational": {
+          "free": true,
+          "status": "active"
+        }
+      },
+      {
+        "modelId": "poolside/laguna-xs-2.1:free",
+        "providerId": "openrouter",
+        "displayName": "Laguna XS 2.1 (OpenRouter, free tier)",
+        "capabilities": [
+          "general",
+          "reasoning",
+          "coding"
+        ],
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "latencyClass": "standard",
+        "priority": 0,
+        "enabled": true,
+        "userOwned": false,
+        "health": "unknown",
+        "operational": {
+          "free": true,
+          "status": "active"
+        }
+      },
+      {
+        "modelId": "inclusionai/ling-3.0-flash-vl:free",
+        "providerId": "openrouter",
+        "displayName": "Ling 3.0 Flash VL (OpenRouter, free tier)",
+        "capabilities": [
+          "vision",
+          "reasoning",
+          "structuredOutput"
+        ],
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "toolCalling": false,
+        "structuredOutput": true,
+        "latencyClass": "fast",
+        "priority": 5,
+        "enabled": true,
+        "userOwned": false,
+        "health": "unknown",
+        "operational": {
+          "free": true,
+          "status": "active"
+        }
+      },
+      {
+        "modelId": "thinkingmachines/inkling:free",
+        "providerId": "openrouter",
+        "displayName": "Inkling (OpenRouter, free tier)",
+        "capabilities": [
+          "general",
+          "reasoning",
+          "vision"
+        ],
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "latencyClass": "standard",
+        "priority": 0,
+        "enabled": true,
+        "userOwned": false,
+        "health": "unknown",
+        "operational": {
+          "free": true,
+          "status": "active"
+        }
+      },
+      {
+        "modelId": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+        "providerId": "openrouter",
+        "displayName": "Nemotron 3 Nano Omni 30B A3B Reasoning (OpenRouter, free tier)",
+        "capabilities": [
+          "general",
+          "reasoning",
+          "vision"
+        ],
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "latencyClass": "standard",
+        "priority": 0,
+        "enabled": true,
+        "userOwned": false,
+        "health": "unknown",
+        "operational": {
+          "free": true,
+          "status": "active"
+        }
+      },
+      {
+        "modelId": "nex-agi/nex-n2.5-pro:free",
+        "providerId": "openrouter",
+        "displayName": "Nex N2.5 Pro (OpenRouter, free tier)",
+        "capabilities": [
+          "general",
+          "reasoning",
+          "agentic",
+          "computerUse",
+          "toolCalling"
+        ],
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "toolCalling": true,
+        "latencyClass": "standard",
+        "priority": 0,
+        "enabled": true,
+        "userOwned": false,
+        "health": "unknown",
+        "operational": {
+          "free": true,
+          "status": "active"
+        }
+      },
+      {
+        "modelId": "dots-studio/dots-3-note-preview:free",
+        "providerId": "openrouter",
+        "displayName": "Dots 3 Note Preview (OpenRouter, free tier, going away)",
+        "capabilities": [
+          "general"
+        ],
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "latencyClass": "standard",
+        "priority": 0,
+        "enabled": false,
+        "userOwned": false,
+        "health": "unknown",
+        "operational": {
+          "free": true,
+          "status": "going-away",
+          "sunsetAt": "2026-09-30"
+        }
+      },
+      {
+        "modelId": "inclusionai/ling-3.0-flash-sante:free",
+        "providerId": "openrouter",
+        "displayName": "Ling 3.0 Flash Sante (OpenRouter, free tier)",
+        "capabilities": [
+          "general"
+        ],
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "latencyClass": "standard",
+        "priority": 0,
+        "enabled": false,
+        "userOwned": false,
+        "health": "unknown",
+        "operational": {
+          "free": true,
+          "status": "experimental"
+        }
+      },
+      {
+        "modelId": "thinkingmachines/inkling-small:free",
+        "providerId": "openrouter",
+        "displayName": "Inkling Small (OpenRouter, free tier)",
+        "capabilities": [
+          "general"
+        ],
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "latencyClass": "standard",
+        "priority": 0,
+        "enabled": false,
+        "userOwned": false,
+        "health": "unknown",
+        "operational": {
+          "free": true,
+          "status": "experimental"
+        }
+      },
+      {
+        "modelId": "nex-agi/nex-n2.5-mini:free",
+        "providerId": "openrouter",
+        "displayName": "Nex N2.5 Mini (OpenRouter, free tier)",
+        "capabilities": [
+          "general"
+        ],
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "latencyClass": "standard",
+        "priority": 0,
+        "enabled": false,
+        "userOwned": false,
+        "health": "unknown",
+        "operational": {
+          "free": true,
+          "status": "experimental"
+        }
+      },
+      {
+        "modelId": "google/gemma-4-26b-a4b-it:free",
+        "providerId": "openrouter",
+        "displayName": "Gemma 4 26B A4B IT (OpenRouter, free tier)",
+        "capabilities": [
+          "general"
+        ],
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "latencyClass": "standard",
+        "priority": 0,
+        "enabled": false,
+        "userOwned": false,
+        "health": "unknown",
+        "operational": {
+          "free": true,
+          "status": "experimental"
+        }
+      },
+      {
+        "modelId": "google/gemma-4-31b-it:free",
+        "providerId": "openrouter",
+        "displayName": "Gemma 4 31B IT (OpenRouter, free tier)",
+        "capabilities": [
+          "general"
+        ],
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "latencyClass": "standard",
+        "priority": 0,
+        "enabled": false,
+        "userOwned": false,
+        "health": "unknown",
+        "operational": {
+          "free": true,
+          "status": "experimental"
+        }
+      },
+      {
+        "modelId": "voyageai/rerank-2.5-lite",
+        "providerId": "openrouter",
+        "displayName": "Voyage Rerank 2.5 Lite (retrieval, not a generative model)",
+        "role": "retrieval",
+        "specializations": [
+          "relevance-ranking",
+          "retrieval"
+        ],
+        "capabilities": [],
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [],
+        "latencyClass": "standard",
+        "priority": 0,
+        "enabled": false,
+        "userOwned": false,
+        "health": "unknown",
+        "operational": {
+          "status": "active"
+        }
+      }
+    ],
+    "routing": {
+      "mode": "balanced",
+      "allowDecomposition": false,
+      "allowParallel": false,
+      "maxModelCalls": 1,
+      "maxRetriesPerStep": 0
+    }
+  }
+}

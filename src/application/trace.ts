@@ -13,7 +13,10 @@ import type {
   DecisionOutcome,
 } from "../decisions/decision.js";
 import type { OperationKind, RiskLevel } from "../decisions/risk.js";
-import type { LlmFailureKind } from "../ports/llm-provider.js";
+import type {
+  LlmContentPresence,
+  LlmFailureKind,
+} from "../ports/llm-provider.js";
 import { type ApprovalStatus, approvalStatusOf } from "./approval-ledger.js";
 import type {
   AgentSessionStatus,
@@ -23,7 +26,11 @@ import type { BudgetEvaluation } from "../observability/budget.js";
 import { evaluateBudget } from "../observability/budget.js";
 import type { Cost, ModelRate } from "../observability/cost.js";
 import { estimateCost } from "../observability/cost.js";
-import type { DomainEvent } from "../observability/events.js";
+import type {
+  CapabilityDecision,
+  DomainEvent,
+} from "../observability/events.js";
+import type { PolicyReasonCode } from "../policy/reason.js";
 import type { LlmCallRecord, TaskMetrics } from "../observability/metrics.js";
 import { computeTaskMetrics } from "../observability/metrics.js";
 import type { AIUsage } from "../observability/usage.js";
@@ -98,6 +105,8 @@ export interface TraceLlmFailure {
   readonly attempts: number;
   readonly retryable: boolean;
   readonly statusCode?: number;
+  /** What a 2xx body carried, for `malformed-response` (structure only). */
+  readonly contentPresence?: LlmContentPresence;
   readonly latencyMs?: number;
 }
 
@@ -126,12 +135,50 @@ export interface TraceDecision {
   readonly kind: DecisionKind;
   readonly question?: string;
   readonly optionCount?: number;
+  /** Candidate ids the question offered, when the writer recorded them. */
+  readonly optionIds?: readonly string[];
+  /** The explanation vocabulary the question could be answered with. */
+  readonly reasonCodes?: readonly string[];
   readonly outcome: DecisionOutcome;
   readonly decidedBy?: DecidedBy;
   readonly selectedOptionId?: string;
+  /** Which layer answered: code, provider or deterministic fallback. */
+  readonly answeredBy?: string;
+  readonly providerId?: string;
+  /**
+   * How the provider that answered produced its answer, when attested.
+   * `"live-sdk"` = real TypeSafe SDK boundary; `"test-double"` = scripted provider.
+   */
+  readonly executionSource?: string;
+  readonly reasonCode?: string;
+  readonly confidence?: number;
+  readonly ranking?: readonly string[];
+  readonly fallbackReason?: string;
+  /** The provider failure that caused a fallback, when there was one. */
+  readonly providerFailureKind?: string;
+  readonly usage?: AIUsage;
+  readonly usageReported?: boolean;
+  /** Absent when the model or decision has no known rate. Never a fake zero. */
+  readonly cost?: Cost;
   readonly requestedAt?: string;
   readonly completedAt?: string;
   readonly latencyMs?: number;
+}
+
+/**
+ * A decision provider that failed to answer.
+ *
+ * Listed separately from `decisions` because a failure and an answer are different
+ * facts: a log that shows only completed decisions would make an unavailable
+ * decision layer look like a decision layer that agreed with the fallback.
+ */
+export interface TraceDecisionFailure {
+  readonly decisionId: DecisionId;
+  readonly kind: DecisionKind;
+  readonly providerId: string;
+  readonly failureKind: string;
+  readonly attempts: number;
+  readonly at: string;
 }
 
 export interface TraceSession {
@@ -215,6 +262,84 @@ export interface TraceContextSelection {
   readonly complete: boolean;
 }
 
+/**
+ * The capability envelope one attempt was given, as declared in the log.
+ *
+ * Recorded once per attempt, before any operation, so "what was this runtime even
+ * allowed to ask for?" is answerable without reading the code that ran — and so a
+ * capability check can be read against the envelope it was evaluated in, rather
+ * than against today's policy.
+ */
+export interface TraceCapabilityEnvelope {
+  readonly policyId: string;
+  readonly policyVersion: number;
+  readonly capabilities: readonly string[];
+  readonly declaredAt: string;
+  readonly sessionId?: SessionId;
+}
+
+/** One enforcement decision. `decision` is the gateway's answer, not a guess. */
+export interface TraceCapabilityCheck {
+  readonly checkId: string;
+  readonly capability: string;
+  readonly operation: OperationKind;
+  readonly targetKind: string;
+  readonly target: string;
+  readonly decision: CapabilityDecision;
+  readonly reasonCode: PolicyReasonCode;
+  readonly requiresApproval: boolean;
+  readonly riskLevel: RiskLevel;
+  readonly approvalRequestId?: string;
+  readonly at: string;
+  readonly sessionId?: SessionId;
+}
+
+/** An operation the boundary authorised and attempted. */
+export interface TraceOperation {
+  readonly operationId: string;
+  readonly capability: string;
+  readonly operation: OperationKind;
+  readonly targetKind?: string;
+  readonly target?: string;
+  readonly startedAt: string;
+  readonly endedAt?: string;
+  readonly ok?: boolean;
+  readonly durationMs?: number;
+  /** The result's size in its own unit: bytes, entries or HTTP status. */
+  readonly resultSize?: number;
+  readonly timedOut?: boolean;
+  /** `started` means no terminal event was found: a crash mid-operation. */
+  readonly outcome: "started" | "completed" | "failed";
+  readonly sessionId?: SessionId;
+}
+
+/** A refusal the enforcement layer recorded, with the reason it gave. */
+export interface TraceOperationRefusal {
+  readonly capability: string;
+  readonly operation: OperationKind;
+  readonly targetKind: string;
+  readonly target: string;
+  readonly reasonCode: PolicyReasonCode;
+  /** True when the boundary refused, false when policy did. */
+  readonly fromSandbox: boolean;
+  readonly at: string;
+  readonly sessionId?: SessionId;
+}
+
+/**
+ * What the enforcement layer decided, in the order it decided it.
+ *
+ * Deliberately three collections rather than one: a *check* is a question, an
+ * *operation* is work that happened, and a *refusal* is work that did not. Merging
+ * them would make "how many operations ran" depend on how the renderer filtered.
+ */
+export interface TracePolicy {
+  readonly envelopes: readonly TraceCapabilityEnvelope[];
+  readonly checks: readonly TraceCapabilityCheck[];
+  readonly operations: readonly TraceOperation[];
+  readonly refusals: readonly TraceOperationRefusal[];
+}
+
 export interface TraceApproval {
   readonly requestId: string;
   readonly riskLevel: RiskLevel;
@@ -283,12 +408,16 @@ export interface TaskTrace {
   readonly elapsedMs: number;
   readonly sessions: readonly TraceSession[];
   readonly decisions: readonly TraceDecision[];
+  /** Consultation failures, whether or not an answer followed. */
+  readonly decisionFailures: readonly TraceDecisionFailure[];
   readonly llmCalls: readonly TraceLlmCall[];
   readonly llmFailures: readonly TraceLlmFailure[];
   readonly toolCalls: readonly TraceToolCall[];
   readonly tests: readonly TraceTestRun[];
   readonly approvals: readonly TraceApproval[];
   readonly contextSelections: readonly TraceContextSelection[];
+  /** Policy, capability and sandbox enforcement, projected from the log. */
+  readonly policy: TracePolicy;
   readonly events: readonly DomainEvent[];
   readonly metrics: TaskMetrics;
   readonly budget: BudgetEvaluation;
@@ -344,9 +473,38 @@ interface PendingToolCall {
 
 interface PendingDecision {
   readonly kind: DecisionKind;
+  readonly decisionId?: string;
   readonly question: string;
   readonly optionCount: number;
+  readonly optionIds?: readonly string[];
+  readonly reasonCodes?: readonly string[];
   readonly requestedAt: string;
+}
+
+interface PendingCapabilityCheck {
+  readonly checkId: string;
+  readonly capability: string;
+  readonly operation: OperationKind;
+  readonly targetKind: string;
+  readonly target: string;
+  readonly at: string;
+  readonly sessionId?: SessionId;
+}
+
+interface MutableOperation {
+  operationId: string;
+  capability: string;
+  operation: OperationKind;
+  targetKind?: string;
+  target?: string;
+  startedAt: string;
+  endedAt?: string;
+  ok?: boolean;
+  durationMs?: number;
+  resultSize?: number;
+  timedOut?: boolean;
+  outcome: "started" | "completed" | "failed";
+  sessionId?: SessionId;
 }
 
 function groupKey(sessionId: SessionId | undefined, toolId: string): string {
@@ -377,16 +535,23 @@ export function createTraceReader(deps: TraceReaderDeps): TraceReader {
       const sessionsById = new Map<string, MutableSession>();
       const sessionOrder: string[] = [];
       const decisions: TraceDecision[] = [];
+      const decisionFailures: TraceDecisionFailure[] = [];
       const llmCalls: TraceLlmCall[] = [];
       const llmFailures: TraceLlmFailure[] = [];
       const toolCalls: TraceToolCall[] = [];
       const tests: TraceTestRun[] = [];
       const approvals: TraceApproval[] = [];
       const contextSelections: TraceContextSelection[] = [];
+      const envelopes: TraceCapabilityEnvelope[] = [];
+      const capabilityChecks: TraceCapabilityCheck[] = [];
+      const operations: MutableOperation[] = [];
+      const refusals: TraceOperationRefusal[] = [];
 
       const pendingLlm = new Map<string, PendingLlmRequest[]>();
       const pendingTools = new Map<string, PendingToolCall[]>();
       const pendingDecisions: PendingDecision[] = [];
+      const pendingChecks = new Map<string, PendingCapabilityCheck>();
+      const pendingOperations = new Map<string, MutableOperation>();
 
       const sessionOf = (
         sessionId: SessionId | undefined,
@@ -586,6 +751,9 @@ export function createTraceReader(deps: TraceReaderDeps): TraceReader {
               ...(event.payload.statusCode === undefined
                 ? {}
                 : { statusCode: event.payload.statusCode }),
+              ...(event.payload.contentPresence === undefined
+                ? {}
+                : { contentPresence: event.payload.contentPresence }),
               ...(event.payload.latencyMs === undefined
                 ? {}
                 : { latencyMs: event.payload.latencyMs }),
@@ -652,18 +820,51 @@ export function createTraceReader(deps: TraceReaderDeps): TraceReader {
           case "DecisionRequested":
             pendingDecisions.push({
               kind: event.payload.kind,
+              ...(event.payload.decisionId === undefined
+                ? {}
+                : { decisionId: event.payload.decisionId }),
               question: event.payload.question,
               optionCount: event.payload.optionCount,
+              ...(event.payload.optionIds === undefined
+                ? {}
+                : { optionIds: event.payload.optionIds }),
+              ...(event.payload.reasonCodes === undefined
+                ? {}
+                : { reasonCodes: event.payload.reasonCodes }),
               requestedAt: event.occurredAt,
             });
             break;
+          case "DecisionFailed":
+            decisionFailures.push({
+              decisionId: event.payload.decisionId as DecisionId,
+              kind: event.payload.kind,
+              providerId: event.payload.providerId,
+              failureKind: event.payload.failureKind,
+              attempts: event.payload.attempts,
+              at: event.occurredAt,
+            });
+            break;
+          case "DecisionFallbackUsed":
+            // Projected onto the answer itself, which carries the same reason. Kept as
+            // an event because it is the only record if the process dies before the
+            // answer is written; the projection below is the answer's view.
+            break;
           case "DecisionCompleted": {
-            // A request and its answer are separate events, and only the answer
-            // carries an id, so pairing is by kind in request order. Deterministic
-            // for a given log.
-            const index = pendingDecisions.findIndex(
-              (pending) => pending.kind === event.payload.kind,
-            );
+            // Pairing is by decision id when the writer recorded one, which is exact;
+            // older logs carry no id on the request, so they fall back to pairing by
+            // kind in request order. Deterministic either way for a given log.
+            const wantedId = event.payload.decisionId;
+            let index = -1;
+            if (wantedId !== undefined) {
+              index = pendingDecisions.findIndex(
+                (pending) => pending.decisionId === wantedId,
+              );
+            }
+            if (index === -1) {
+              index = pendingDecisions.findIndex(
+                (pending) => pending.kind === event.payload.kind,
+              );
+            }
             const requested =
               index === -1 ? undefined : pendingDecisions.splice(index, 1)[0];
             if (requested === undefined) {
@@ -671,14 +872,37 @@ export function createTraceReader(deps: TraceReaderDeps): TraceReader {
                 `DecisionCompleted event "${event.id}" has no matching DecisionRequested`,
               );
             }
+            const priced =
+              event.payload.usage === undefined ||
+              event.payload.providerId === undefined
+                ? undefined
+                : estimateCost({
+                    usage: event.payload.usage,
+                    providerId: event.payload.providerId,
+                    // Pricing keys on both, so a decision whose provider named no
+                    // model is priced only if a rate exists under the provider's own
+                    // name. Otherwise it stays unpriced, never free.
+                    modelId: event.payload.modelId ?? event.payload.providerId,
+                    rates: deps.rates,
+                    at: event.occurredAt,
+                  });
+            const failure = decisionFailures.find(
+              (entry) => entry.decisionId === wantedId,
+            );
             decisions.push({
-              decisionId: event.payload.decisionId as DecisionId,
+              decisionId: wantedId as DecisionId,
               kind: event.payload.kind,
               ...(requested === undefined
                 ? {}
                 : {
                     question: requested.question,
                     optionCount: requested.optionCount,
+                    ...(requested.optionIds === undefined
+                      ? {}
+                      : { optionIds: requested.optionIds }),
+                    ...(requested.reasonCodes === undefined
+                      ? {}
+                      : { reasonCodes: requested.reasonCodes }),
                     requestedAt: requested.requestedAt,
                   }),
               outcome: event.payload.outcome,
@@ -686,6 +910,47 @@ export function createTraceReader(deps: TraceReaderDeps): TraceReader {
               ...(event.payload.selectedOptionId === undefined
                 ? {}
                 : { selectedOptionId: event.payload.selectedOptionId }),
+              ...(event.payload.answeredBy === undefined
+                ? {}
+                : { answeredBy: event.payload.answeredBy }),
+              ...(event.payload.providerId === undefined
+                ? {}
+                : { providerId: event.payload.providerId }),
+              ...(event.payload.executionSource === undefined
+                ? {}
+                : { executionSource: event.payload.executionSource }),
+              ...(event.payload.reasonCode === undefined
+                ? {}
+                : { reasonCode: event.payload.reasonCode }),
+              ...(event.payload.confidence === undefined
+                ? {}
+                : { confidence: event.payload.confidence }),
+              ...(event.payload.ranking === undefined
+                ? {}
+                : { ranking: event.payload.ranking }),
+              ...(event.payload.fallbackReason === undefined
+                ? {}
+                : { fallbackReason: event.payload.fallbackReason }),
+              ...(failure === undefined
+                ? {}
+                : { providerFailureKind: failure.failureKind }),
+              ...(event.payload.usage === undefined
+                ? {}
+                : { usage: event.payload.usage }),
+              ...(event.payload.usageReported === undefined
+                ? {}
+                : { usageReported: event.payload.usageReported }),
+              ...(event.payload.costMicros === undefined
+                ? {}
+                : {
+                    cost: {
+                      currency: "USD" as const,
+                      micros: event.payload.costMicros,
+                    },
+                  }),
+              ...(priced === undefined || event.payload.costMicros !== undefined
+                ? {}
+                : { cost: priced }),
               completedAt: event.occurredAt,
               ...(event.payload.latencyMs === undefined
                 ? {}
@@ -693,6 +958,144 @@ export function createTraceReader(deps: TraceReaderDeps): TraceReader {
             });
             break;
           }
+          case "CapabilitiesDeclared":
+            envelopes.push({
+              policyId: event.payload.policyId,
+              policyVersion: event.payload.policyVersion,
+              capabilities: event.payload.capabilities,
+              declaredAt: event.occurredAt,
+              ...(event.sessionId === undefined
+                ? {}
+                : { sessionId: event.sessionId }),
+            });
+            break;
+          case "CapabilityCheckRequested":
+            pendingChecks.set(event.payload.checkId, {
+              checkId: event.payload.checkId,
+              capability: event.payload.capability,
+              operation: event.payload.operation,
+              targetKind: event.payload.targetKind,
+              target: event.payload.target,
+              at: event.occurredAt,
+              ...(event.sessionId === undefined
+                ? {}
+                : { sessionId: event.sessionId }),
+            });
+            break;
+          case "CapabilityCheckCompleted": {
+            const checkId = event.payload.checkId;
+            const pending = pendingChecks.get(checkId);
+            if (pending === undefined) {
+              // A verdict without a question means the log is out of order or a
+              // writer skipped a step. Reporting it is the whole point of recording
+              // the request first.
+              issues.push(
+                `CapabilityCheckCompleted "${checkId}" has no matching CapabilityCheckRequested`,
+              );
+              break;
+            }
+            pendingChecks.delete(checkId);
+            // An `allowed` verdict for a capability no declared envelope contains is
+            // a contradiction: the gateway evaluates against the envelope, so this
+            // can only come from a log written by something else.
+            if (
+              event.payload.decision === "allowed" &&
+              envelopes.length > 0 &&
+              !envelopes.some((envelope) =>
+                envelope.capabilities.includes(pending.capability),
+              )
+            ) {
+              issues.push(
+                `capability "${pending.capability}" was allowed at "${pending.at}" but no declared envelope contains it`,
+              );
+            }
+            capabilityChecks.push({
+              checkId,
+              capability: pending.capability,
+              operation: pending.operation,
+              targetKind: pending.targetKind,
+              target: pending.target,
+              decision: event.payload.decision,
+              reasonCode: event.payload.reasonCode,
+              requiresApproval: event.payload.requiresApproval,
+              riskLevel: event.payload.riskLevel,
+              ...(event.payload.approvalRequestId === undefined
+                ? {}
+                : { approvalRequestId: event.payload.approvalRequestId }),
+              at: event.occurredAt,
+              ...(event.sessionId === undefined
+                ? {}
+                : { sessionId: event.sessionId }),
+            });
+            break;
+          }
+          case "OperationStarted": {
+            const started: MutableOperation = {
+              operationId: event.payload.operationId,
+              capability: event.payload.capability,
+              operation: event.payload.operation,
+              targetKind: event.payload.targetKind,
+              target: event.payload.target,
+              startedAt: event.occurredAt,
+              outcome: "started",
+              ...(event.sessionId === undefined
+                ? {}
+                : { sessionId: event.sessionId }),
+            };
+            operations.push(started);
+            pendingOperations.set(started.operationId, started);
+            break;
+          }
+          case "OperationCompleted": {
+            const pending = pendingOperations.get(event.payload.operationId);
+            if (pending === undefined) {
+              issues.push(
+                `OperationCompleted "${event.payload.operationId}" has no matching OperationStarted`,
+              );
+              break;
+            }
+            pendingOperations.delete(event.payload.operationId);
+            pending.endedAt = event.occurredAt;
+            pending.ok = event.payload.ok;
+            pending.durationMs = event.payload.durationMs;
+            pending.outcome = event.payload.ok ? "completed" : "failed";
+            if (event.payload.resultSize !== undefined) {
+              pending.resultSize = event.payload.resultSize;
+            }
+            if (event.payload.timedOut !== undefined) {
+              pending.timedOut = event.payload.timedOut;
+            }
+            break;
+          }
+          case "OperationFailed": {
+            const pending = pendingOperations.get(event.payload.operationId);
+            if (pending === undefined) {
+              issues.push(
+                `OperationFailed "${event.payload.operationId}" has no matching OperationStarted`,
+              );
+              break;
+            }
+            pendingOperations.delete(event.payload.operationId);
+            pending.endedAt = event.occurredAt;
+            pending.ok = false;
+            pending.outcome = "failed";
+            break;
+          }
+          case "OperationDenied":
+          case "SandboxViolation":
+            refusals.push({
+              capability: event.payload.capability,
+              operation: event.payload.operation,
+              targetKind: event.payload.targetKind,
+              target: event.payload.target,
+              reasonCode: event.payload.reasonCode,
+              fromSandbox: event.type === "SandboxViolation",
+              at: event.occurredAt,
+              ...(event.sessionId === undefined
+                ? {}
+                : { sessionId: event.sessionId }),
+            });
+            break;
           case "ContextSelectionStarted":
             contextSelections.push({
               selectionId: event.payload.selectionId,
@@ -937,6 +1340,20 @@ export function createTraceReader(deps: TraceReaderDeps): TraceReader {
           ? 0
           : durationMsFrom(firstEventAt, lastEventAt);
 
+      // An unanswered question or an unterminated operation is exactly what the
+      // request-before-verdict ordering is for, so both are reported rather than
+      // repaired: a repaired trace cannot be audited.
+      for (const check of pendingChecks.values()) {
+        issues.push(
+          `capability check "${check.checkId}" (${check.capability}) was requested and never answered`,
+        );
+      }
+      for (const operation of pendingOperations.values()) {
+        issues.push(
+          `operation "${operation.operationId}" (${operation.capability}) started and never finished`,
+        );
+      }
+
       const metricsStartedAt =
         firstEventAt ?? record?.task.createdAt ?? UNKNOWN_INSTANT;
       const llmRecords: LlmCallRecord[] = llmCalls.map((call) => ({
@@ -962,8 +1379,40 @@ export function createTraceReader(deps: TraceReaderDeps): TraceReader {
         decisions: decisions.flatMap((decision) =>
           decision.decidedBy === undefined
             ? []
-            : [{ decidedBy: decision.decidedBy, outcome: decision.outcome }],
+            : [
+                {
+                  decidedBy: decision.decidedBy,
+                  outcome: decision.outcome,
+                  kind: decision.kind,
+                  ...(decision.answeredBy === undefined
+                    ? {}
+                    : {
+                        answeredBy:
+                          decision.answeredBy === "provider" ||
+                          decision.answeredBy === "fallback" ||
+                          decision.answeredBy === "deterministic"
+                            ? decision.answeredBy
+                            : "deterministic",
+                      }),
+                  ...(decision.fallbackReason === undefined
+                    ? {}
+                    : { fallbackReason: decision.fallbackReason }),
+                  ...(decision.usage === undefined
+                    ? {}
+                    : { usage: decision.usage }),
+                  ...(decision.usageReported === undefined
+                    ? {}
+                    : { usageReported: decision.usageReported }),
+                  ...(decision.cost === undefined
+                    ? {}
+                    : { cost: decision.cost }),
+                  ...(decision.latencyMs === undefined
+                    ? {}
+                    : { latencyMs: decision.latencyMs }),
+                },
+              ],
         ),
+        decisionFailures: decisionFailures.length,
         // Only completed selections contribute: a selection that never finished has
         // no counters, and counting a partial one would understate the ratio.
         contextSelections: contextSelections
@@ -1012,11 +1461,18 @@ export function createTraceReader(deps: TraceReaderDeps): TraceReader {
         elapsedMs,
         sessions,
         decisions,
+        decisionFailures,
         llmCalls,
         llmFailures,
         toolCalls,
         tests,
         contextSelections,
+        policy: {
+          envelopes,
+          checks: capabilityChecks,
+          operations,
+          refusals,
+        },
         approvals:
           nowMs === undefined
             ? approvals

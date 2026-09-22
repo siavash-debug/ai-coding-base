@@ -4,15 +4,28 @@ import { DomainError } from "../../core/errors.js";
 import {
   assertNoSecretLikeValue,
   assertNonEmptyString,
+  assertNonNegativeInteger,
   assertOneOf,
   assertPositiveInteger,
   assertStringArray,
 } from "../../core/validation.js";
 import { parsePathPattern } from "../../context/ignore.js";
 import {
+  type AccessPolicy,
+  assertAccessPolicy,
+} from "../../policy/access-policy.js";
+import {
   type ModelRate,
   assertValidModelRate,
 } from "../../observability/cost.js";
+import {
+  DEFAULT_FRONTIER_MODELS,
+  ROUTING_MODES,
+  type ModelProfile,
+  type RoutingMode,
+  assertModelProfile,
+  roleOf,
+} from "../../models/model.js";
 import { type Project, validateProject } from "../../projects/project.js";
 import {
   type Workspace,
@@ -193,6 +206,506 @@ export function assertLlmConfig(
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
     ...(maxAttempts === undefined ? {} : { maxAttempts }),
   };
+}
+
+/**
+ * Decision-layer configuration.
+ *
+ * The decision layer is optional by architecture, so the default is `disabled`: a
+ * project that says nothing about decisions gets deterministic answers, recorded as
+ * such, and no network call at all (ADR-004, ADR-052). Selecting `jev-http` is an
+ * explicit act, and even then the credential is referenced by the *name* of an
+ * environment variable rather than by value.
+ *
+ * `maxDecisionsPerTask` is a hard budget, not a hint: when it is exhausted the
+ * decision layer is not consulted and the deterministic fallback answers. It has a
+ * minimum of 1 because a budget of zero would mean "record nothing about decisions",
+ * which contradicts the observability invariant.
+ */
+export const DECISION_PROVIDER_KINDS = [
+  "disabled",
+  "jev-http",
+  "typesafe",
+] as const;
+
+export type DecisionProviderKind = (typeof DECISION_PROVIDER_KINDS)[number];
+
+/** The credential variable TypeSafe's own SDK looks for, used unless configured otherwise. */
+export const DEFAULT_TYPESAFE_CREDENTIAL_ENV_VAR = "TYPESAFE_API_KEY";
+/** The documented TypeSafe API root, used unless configured otherwise. */
+export const DEFAULT_TYPESAFE_BASE_URL = "https://api.typesafe.ai";
+/** The documented default JEV model, used unless configured otherwise. */
+export const DEFAULT_TYPESAFE_MODEL = "jev-latest";
+
+export const MAX_DECISIONS_PER_TASK = 200;
+export const MAX_DECISION_RETRIES_PER_TASK = 5;
+export const MAX_DECISION_TIMEOUT_MS = 120_000;
+
+interface DecisionLimits {
+  /** Hard cap on recorded decisions for one task. */
+  readonly maxDecisionsPerTask: number;
+  /**
+   * Attempt-level retries the retry gate may consider.
+   *
+   * Transport retries already happen inside a provider adapter with its own cap;
+   * this is the second, coarser level — re-running an attempt — and it is capped here
+   * so no decision layer can extend it.
+   */
+  readonly maxRetriesPerTask: number;
+  /**
+   * Optional hard cap on known decision cost per task.
+   *
+   * Enforced from the log: once the recorded cost of consultations reaches the cap,
+   * the decision layer is not consulted again. `undefined` means the count cap is the
+   * only bound. Cost that could not be priced is not counted here — it is reported as
+   * unpriced elsewhere rather than silently treated as free.
+   */
+  readonly maxDecisionCostMicrosPerTask?: number;
+}
+
+export type DecisionConfig =
+  | ({ readonly provider: "disabled" } & DecisionLimits)
+  | ({
+      readonly provider: "jev-http";
+      /** Decision service root, e.g. `https://jev.internal/v1`. */
+      readonly baseUrl: string;
+      /** Name of the environment variable holding the credential. Never the key. */
+      readonly credentialEnvVar: string;
+      /** Optional provider-side model or version identifier. */
+      readonly modelId?: string;
+      readonly timeoutMs?: number;
+    } & DecisionLimits)
+  | ({
+      /**
+       * TypeSafe is the JEV implementation: the SDK talks to `api.typesafe.ai`
+       * through the same guarded transport every other provider uses.
+       */
+      readonly provider: "typesafe";
+      /** API root. Defaults to the documented `https://api.typesafe.ai`. */
+      readonly baseUrl?: string;
+      /** Name of the environment variable holding the credential. Never the key. */
+      readonly credentialEnvVar: string;
+      /** Default JEV model. Defaults to the documented `jev-latest`. */
+      readonly defaultModel?: string;
+      readonly timeoutMs?: number;
+    } & DecisionLimits);
+
+export const DEFAULT_DECISION_CONFIG: DecisionConfig = {
+  provider: "disabled",
+  maxDecisionsPerTask: 24,
+  maxRetriesPerTask: 1,
+};
+
+export function assertDecisionConfig(
+  value: unknown,
+  field = "config.decision",
+): DecisionConfig {
+  if (value === undefined) {
+    return DEFAULT_DECISION_CONFIG;
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new DomainError("VALIDATION", `${field} must be an object`, {
+      field,
+    });
+  }
+  const candidate = value as Record<string, unknown>;
+  const provider = assertOneOf(
+    candidate["provider"] ?? DEFAULT_DECISION_CONFIG.provider,
+    DECISION_PROVIDER_KINDS,
+    `${field}.provider`,
+  );
+
+  const maxDecisionsPerTask = assertOptionalBoundedInteger(
+    candidate["maxDecisionsPerTask"] ??
+      DEFAULT_DECISION_CONFIG.maxDecisionsPerTask,
+    `${field}.maxDecisionsPerTask`,
+    MAX_DECISIONS_PER_TASK,
+  );
+  const maxRetriesPerTask = assertOptionalBoundedInteger(
+    candidate["maxRetriesPerTask"] ?? DEFAULT_DECISION_CONFIG.maxRetriesPerTask,
+    `${field}.maxRetriesPerTask`,
+    MAX_DECISION_RETRIES_PER_TASK,
+  );
+  const maxDecisionCostMicrosPerTask = assertOptionalBoundedInteger(
+    candidate["maxDecisionCostMicrosPerTask"],
+    `${field}.maxDecisionCostMicrosPerTask`,
+    1_000_000_000,
+  );
+  const limits: DecisionLimits = {
+    maxDecisionsPerTask: maxDecisionsPerTask ?? 1,
+    maxRetriesPerTask: maxRetriesPerTask ?? 0,
+    ...(maxDecisionCostMicrosPerTask === undefined
+      ? {}
+      : { maxDecisionCostMicrosPerTask }),
+  };
+
+  if (provider === "disabled") {
+    return { provider, ...limits };
+  }
+
+  const optionalModel = (
+    key: "modelId" | "defaultModel",
+  ): string | undefined => {
+    if (candidate[key] === undefined) {
+      return undefined;
+    }
+    const text = assertNonEmptyString(candidate[key], `${field}.${key}`);
+    assertNoSecretLikeValue(text, `${field}.${key}`);
+    return text;
+  };
+  const timeoutMs = assertOptionalBoundedInteger(
+    candidate["timeoutMs"],
+    `${field}.timeoutMs`,
+    MAX_DECISION_TIMEOUT_MS,
+  );
+
+  if (provider === "typesafe") {
+    const baseUrl =
+      candidate["baseUrl"] === undefined
+        ? undefined
+        : assertBaseUrl(candidate["baseUrl"], `${field}.baseUrl`);
+    const credentialEnvVar = assertCredentialVariableName(
+      candidate["credentialEnvVar"] ?? DEFAULT_TYPESAFE_CREDENTIAL_ENV_VAR,
+      `${field}.credentialEnvVar`,
+    );
+    const defaultModel = optionalModel("defaultModel");
+    return {
+      provider,
+      ...(baseUrl === undefined ? {} : { baseUrl }),
+      credentialEnvVar,
+      ...(defaultModel === undefined ? {} : { defaultModel }),
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      ...limits,
+    };
+  }
+
+  const baseUrl = assertBaseUrl(candidate["baseUrl"], `${field}.baseUrl`);
+  const credentialEnvVar = assertCredentialVariableName(
+    candidate["credentialEnvVar"],
+    `${field}.credentialEnvVar`,
+  );
+  const modelId = optionalModel("modelId");
+
+  return {
+    provider,
+    baseUrl,
+    credentialEnvVar,
+    ...(modelId === undefined ? {} : { modelId }),
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    ...limits,
+  };
+}
+
+/**
+ * Frontier configuration: the model catalog, the providers that can reach it, and the
+ * routing policy that orders it.
+ *
+ * Three separate things, deliberately kept separate (ADR-056):
+ *
+ * - `models` is **knowledge** — what a model can do. Registering a model creates no
+ *   authority to call it and no network path.
+ * - `providers` is a **connection** — an API root and the *name* of the environment
+ *   variable holding its credential. Configuring a provider still does not make its
+ *   host reachable: `policy.network.providerHosts` must allow it, or the transport
+ *   refuses before a socket exists (ADR-050).
+ * - `routing` is **preference** — cost, latency, quality or balanced, the bounds, and
+ *   whether decomposition and parallel execution are permitted at all.
+ *
+ * `enabled` defaults to false, so a project that says nothing about frontier keeps
+ * the Phase D/E behaviour exactly: no model calls, no vendor account, no network.
+ */
+export const FRONTIER_PROVIDER_KINDS = ["openai-compatible"] as const;
+export type FrontierProviderKind = (typeof FRONTIER_PROVIDER_KINDS)[number];
+
+export const MAX_FRONTIER_MODEL_CALLS = 12;
+export const MAX_FRONTIER_RETRIES_PER_STEP = 3;
+export const MAX_FRONTIER_MODELS = 32;
+export const MAX_FRONTIER_PROVIDERS = 8;
+
+export interface FrontierProviderConfig {
+  readonly id: string;
+  readonly kind: FrontierProviderKind;
+  /** API root, e.g. `https://openrouter.ai/api/v1`. */
+  readonly baseUrl: string;
+  /** Name of the environment variable holding the key. Never the key. */
+  readonly credentialEnvVar: string;
+  readonly timeoutMs?: number;
+  readonly maxAttempts?: number;
+}
+
+export interface FrontierRoutingConfig {
+  readonly mode: RoutingMode;
+  readonly allowDecomposition: boolean;
+  readonly allowParallel: boolean;
+  /** Hard cap on model calls for one orchestrated run. */
+  readonly maxModelCalls: number;
+  /** Hard cap on retries per step; the retry decision may spend fewer, never more. */
+  readonly maxRetriesPerStep: number;
+}
+
+export interface FrontierConfig {
+  readonly enabled: boolean;
+  readonly providers: readonly FrontierProviderConfig[];
+  readonly models: readonly ModelProfile[];
+  readonly routing: FrontierRoutingConfig;
+}
+
+/**
+ * The registered models a generative provider adapter may serve.
+ *
+ * A model's *role* is what keeps "registered" from meaning "executable". The registry
+ * holds knowledge, including knowledge about models that answer a different kind of
+ * question — a reranker scores passages, it does not write an answer — and the adapter's
+ * model list is the boundary where that knowledge would otherwise become reachable.
+ * Filtering here, rather than relying on eligibility alone, means a non-generative
+ * model cannot be named, cannot be resolved by Frontier, and cannot become the one
+ * registered entry that a mis-written plan could turn into a live request.
+ *
+ * `enabled` is deliberately not consulted here: it is a *routing* preference, and this
+ * function answers a *connection* question.
+ */
+export function generativeModels(
+  frontier: FrontierConfig,
+): readonly ModelProfile[] {
+  return frontier.models.filter((model) => roleOf(model) === "generative");
+}
+
+export const DEFAULT_FRONTIER_CONFIG: FrontierConfig = {
+  enabled: false,
+  providers: [
+    {
+      id: "openrouter",
+      kind: "openai-compatible",
+      baseUrl: "https://openrouter.ai/api/v1",
+      credentialEnvVar: "OPENROUTER_API_KEY",
+    },
+  ],
+  models: DEFAULT_FRONTIER_MODELS,
+  routing: {
+    mode: "balanced",
+    allowDecomposition: true,
+    allowParallel: true,
+    maxModelCalls: 4,
+    maxRetriesPerStep: 1,
+  },
+};
+
+function assertFrontierProvider(
+  value: unknown,
+  field: string,
+): FrontierProviderConfig {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new DomainError("VALIDATION", `${field} must be an object`, {
+      field,
+    });
+  }
+  const candidate = value as Record<string, unknown>;
+  const id = assertNonEmptyString(candidate["id"], `${field}.id`);
+  assertNoSecretLikeValue(id, `${field}.id`);
+  const kind = assertOneOf(
+    candidate["kind"],
+    FRONTIER_PROVIDER_KINDS,
+    `${field}.kind`,
+  );
+  const baseUrl = assertBaseUrl(candidate["baseUrl"], `${field}.baseUrl`);
+  const credentialEnvVar = assertCredentialVariableName(
+    candidate["credentialEnvVar"],
+    `${field}.credentialEnvVar`,
+  );
+  const timeoutMs = assertOptionalBoundedInteger(
+    candidate["timeoutMs"],
+    `${field}.timeoutMs`,
+    MAX_LLM_TIMEOUT_MS,
+  );
+  const maxAttempts = assertOptionalBoundedInteger(
+    candidate["maxAttempts"],
+    `${field}.maxAttempts`,
+    MAX_LLM_ATTEMPTS,
+  );
+  return {
+    id,
+    kind,
+    baseUrl,
+    credentialEnvVar,
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    ...(maxAttempts === undefined ? {} : { maxAttempts }),
+  };
+}
+
+export function assertFrontierConfig(
+  value: unknown,
+  field = "config.frontier",
+): FrontierConfig {
+  if (value === undefined) {
+    return DEFAULT_FRONTIER_CONFIG;
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new DomainError("VALIDATION", `${field} must be an object`, {
+      field,
+    });
+  }
+  const candidate = value as Record<string, unknown>;
+  const enabled =
+    candidate["enabled"] === undefined
+      ? DEFAULT_FRONTIER_CONFIG.enabled
+      : (() => {
+          if (typeof candidate["enabled"] !== "boolean") {
+            throw new DomainError(
+              "VALIDATION",
+              `${field}.enabled must be a boolean`,
+              { field: `${field}.enabled` },
+            );
+          }
+          return candidate["enabled"];
+        })();
+
+  const rawProviders = candidate["providers"] ?? [];
+  if (!Array.isArray(rawProviders)) {
+    throw new DomainError("VALIDATION", `${field}.providers must be an array`, {
+      field: `${field}.providers`,
+    });
+  }
+  if (rawProviders.length > MAX_FRONTIER_PROVIDERS) {
+    throw new DomainError(
+      "VALIDATION",
+      `${field}.providers must carry at most ${MAX_FRONTIER_PROVIDERS} entries`,
+      { field: `${field}.providers` },
+    );
+  }
+  const providerIds = new Set<string>();
+  const providers = rawProviders.map((entry, index) => {
+    const provider = assertFrontierProvider(
+      entry,
+      `${field}.providers[${index}]`,
+    );
+    if (providerIds.has(provider.id)) {
+      throw new DomainError(
+        "INVARIANT",
+        `duplicate frontier provider id "${provider.id}"`,
+        { field: `${field}.providers[${index}].id` },
+      );
+    }
+    providerIds.add(provider.id);
+    return provider;
+  });
+
+  const rawModels = candidate["models"] ?? [];
+  if (!Array.isArray(rawModels)) {
+    throw new DomainError("VALIDATION", `${field}.models must be an array`, {
+      field: `${field}.models`,
+    });
+  }
+  if (rawModels.length > MAX_FRONTIER_MODELS) {
+    throw new DomainError(
+      "VALIDATION",
+      `${field}.models must carry at most ${MAX_FRONTIER_MODELS} entries`,
+      { field: `${field}.models` },
+    );
+  }
+  const modelIds = new Set<string>();
+  const models = rawModels.map((entry, index) => {
+    const model = assertModelProfile(entry, `${field}.models[${index}]`);
+    if (modelIds.has(model.modelId)) {
+      throw new DomainError(
+        "INVARIANT",
+        `duplicate frontier model id "${model.modelId}"`,
+        { field: `${field}.models[${index}].modelId` },
+      );
+    }
+    if (!providerIds.has(model.providerId)) {
+      // A registered model with no configured provider is knowledge without a
+      // connection. It is a configuration error, not something to skip silently:
+      // a plan that names it would fail at execution time.
+      throw new DomainError(
+        "INVARIANT",
+        `${field}.models[${index}].providerId "${model.providerId}" is not one of ${field}.providers`,
+        { field: `${field}.models[${index}].providerId` },
+      );
+    }
+    modelIds.add(model.modelId);
+    return model;
+  });
+
+  const rawRouting =
+    candidate["routing"] === undefined ? {} : candidate["routing"];
+  if (
+    typeof rawRouting !== "object" ||
+    rawRouting === null ||
+    Array.isArray(rawRouting)
+  ) {
+    throw new DomainError("VALIDATION", `${field}.routing must be an object`, {
+      field: `${field}.routing`,
+    });
+  }
+  const routingCandidate = rawRouting as Record<string, unknown>;
+  const defaults = DEFAULT_FRONTIER_CONFIG.routing;
+  const routing: FrontierRoutingConfig = {
+    mode: assertOneOf(
+      routingCandidate["mode"] ?? defaults.mode,
+      ROUTING_MODES,
+      `${field}.routing.mode`,
+    ),
+    allowDecomposition: booleanOrDefault(
+      routingCandidate["allowDecomposition"],
+      defaults.allowDecomposition,
+      `${field}.routing.allowDecomposition`,
+    ),
+    allowParallel: booleanOrDefault(
+      routingCandidate["allowParallel"],
+      defaults.allowParallel,
+      `${field}.routing.allowParallel`,
+    ),
+    maxModelCalls:
+      assertOptionalBoundedInteger(
+        routingCandidate["maxModelCalls"],
+        `${field}.routing.maxModelCalls`,
+        MAX_FRONTIER_MODEL_CALLS,
+      ) ?? defaults.maxModelCalls,
+    // Zero is a legitimate setting here: "never retry a step" is a policy, and it
+    // must be expressible (unlike a token budget, where zero would mean the same as
+    // a missing budget with a worse trace).
+    maxRetriesPerStep:
+      assertOptionalNonNegativeBoundedInteger(
+        routingCandidate["maxRetriesPerStep"],
+        `${field}.routing.maxRetriesPerStep`,
+        MAX_FRONTIER_RETRIES_PER_STEP,
+      ) ?? defaults.maxRetriesPerStep,
+  };
+
+  return { enabled, providers, models, routing };
+}
+
+function assertOptionalNonNegativeBoundedInteger(
+  value: unknown,
+  field: string,
+  maximum: number,
+): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const parsed = assertNonNegativeInteger(value, field);
+  if (parsed > maximum) {
+    throw new DomainError("VALIDATION", `${field} must be at most ${maximum}`, {
+      field,
+    });
+  }
+  return parsed;
+}
+
+function booleanOrDefault(
+  value: unknown,
+  fallback: boolean,
+  field: string,
+): boolean {
+  if (value === undefined) {
+    return fallback;
+  }
+  if (typeof value !== "boolean") {
+    throw new DomainError("VALIDATION", `${field} must be a boolean`, {
+      field,
+    });
+  }
+  return value;
 }
 
 /**
@@ -419,6 +932,31 @@ export interface ProjectConfig {
   readonly modelRates: readonly ModelRate[];
   readonly llm: LlmConfig;
   readonly context: ContextConfig;
+  /**
+   * The enforcement policy: what any operation may touch.
+   *
+   * Part of the project configuration rather than a separate file because it is
+   * read at exactly the same moments as everything else here, and because a second
+   * configuration system would be a second thing to keep in sync (ADR-045). Absent
+   * means the built-in deny-everything policy, so a configuration written before
+   * Phase F keeps working — it simply cannot reach anything.
+   */
+  readonly policy: AccessPolicy;
+  /**
+   * The decision layer: which engine, if any, may answer bounded questions.
+   *
+   * Absent means `disabled`, so a configuration written before Phase G keeps working
+   * and answers every question deterministically.
+   */
+  readonly decision: DecisionConfig;
+  /**
+   * The model catalog and routing policy.
+   *
+   * Absent means the documented defaults: the registry describes the built-in Ling
+   * models, routing is disabled, and nothing is called. A configuration written
+   * before Phase H therefore keeps working unchanged.
+   */
+  readonly frontier: FrontierConfig;
 }
 
 export function assertProjectConfig(value: unknown): ProjectConfig {
@@ -492,7 +1030,21 @@ export function assertProjectConfig(value: unknown): ProjectConfig {
   // Absent means the documented defaults, so a Phase D configuration keeps working
   // unchanged and an operator only writes what they actually want to change.
   const context = assertContextConfig(candidate["context"], "config.context");
-
+  // Absent means "this project may reach nothing", which is the only safe reading
+  // of an unconfigured boundary. It is never defaulted to something permissive.
+  const policy = assertAccessPolicy(candidate["policy"], "config.policy");
+  // Absent means "no decision engine is installed", which is a fully functional
+  // state: bounded questions are then answered deterministically and recorded.
+  const decision = assertDecisionConfig(
+    candidate["decision"],
+    "config.decision",
+  );
+  // Absent means "the registry is populated but nothing may be routed", which keeps
+  // every pre-Phase-H project working with no model calls at all.
+  const frontier = assertFrontierConfig(
+    candidate["frontier"],
+    "config.frontier",
+  );
   return {
     schemaVersion: PROJECT_CONFIG_SCHEMA_VERSION,
     project,
@@ -500,6 +1052,9 @@ export function assertProjectConfig(value: unknown): ProjectConfig {
     modelRates,
     llm,
     context,
+    policy,
+    decision,
+    frontier,
   };
 }
 

@@ -19,15 +19,21 @@ import {
   requirePositional,
 } from "../args.js";
 import { EXIT_FAILURE, EXIT_OK, type CliEnv, type CliIo } from "../io.js";
-import { openRuntimeFor, readScope } from "../context.js";
+import {
+  openRuntimeFor,
+  readScope,
+  requireProviderCredentials,
+} from "../context.js";
 import { printHelp } from "../help.js";
 import { selectContextForTask } from "../../application/context-service.js";
 import {
   formatContextSelection,
+  formatOrchestration,
   formatRunResult,
   formatTask,
   formatTaskContext,
   formatTaskCost,
+  formatTaskDecisions,
   formatTaskList,
   formatTrace,
   formatUsage,
@@ -145,6 +151,38 @@ const CONTEXT_SPECS: readonly FlagSpec[] = [
   ...COMMON_SPECS,
 ];
 
+const ORCHESTRATE_SPECS: readonly FlagSpec[] = [
+  {
+    name: "context",
+    value: false,
+    description:
+      "select task context and send it to the model (recorded as a reference; the content is never recorded)",
+  },
+  {
+    name: "require",
+    value: true,
+    multiple: true,
+    placeholder: "capability",
+    description: "declare a required model capability (repeatable)",
+  },
+  {
+    name: "specialize",
+    value: true,
+    multiple: true,
+    placeholder: "domain",
+    description: "declare a required model specialization (repeatable)",
+  },
+  {
+    name: "subtask",
+    value: true,
+    multiple: true,
+    placeholder: "instruction",
+    description:
+      "declare an independent sub-task, enabling parallel execution (repeatable)",
+  },
+  ...COMMON_SPECS,
+];
+
 const APPROVE_SPECS: readonly FlagSpec[] = [
   {
     name: "approver",
@@ -190,12 +228,21 @@ const SUBCOMMANDS: Readonly<
   },
   status: { usage: "ai task status <task-id> [--json]", specs: COMMON_SPECS },
   run: { usage: "ai task run <task-id> [--json]", specs: COMMON_SPECS },
+  orchestrate: {
+    usage:
+      "ai task orchestrate <task-id> [--context] [--require <capability>] [--specialize <domain>] [--subtask <instruction>] [--json]",
+    specs: ORCHESTRATE_SPECS,
+  },
   trace: { usage: "ai task trace <task-id> [--json]", specs: COMMON_SPECS },
   context: {
     usage: "ai task context <task-id> [--select] [--explain] [--json]",
     specs: CONTEXT_SPECS,
   },
   usage: { usage: "ai task usage <task-id> [--json]", specs: COMMON_SPECS },
+  decisions: {
+    usage: "ai task decisions <task-id> [--json]",
+    specs: COMMON_SPECS,
+  },
   cost: { usage: "ai task cost <task-id> [--json]", specs: COMMON_SPECS },
   complete: {
     usage: "ai task complete <task-id> [--reason <text>] [--json]",
@@ -461,6 +508,27 @@ export async function runTaskCommand(
       return EXIT_OK;
     }
 
+    case "decisions": {
+      // Scope-safe by construction: a task outside this scope returns `found: false`
+      // and is reported as a missing task, without revealing whether it exists
+      // somewhere else.
+      const runtime = await openRuntimeFor(args, env);
+      const trace = requireKnownTask(
+        await runtime.traces.read(
+          readScope(runtime, args),
+          positionalTaskId(args),
+        ),
+        positionalTaskId(args),
+      );
+      emit(
+        io,
+        json,
+        { decisions: trace.decisions, failures: trace.decisionFailures },
+        formatTaskDecisions(trace),
+      );
+      return EXIT_OK;
+    }
+
     case "context": {
       const runtime = await openRuntimeFor(args, env);
       const scope = readScope(runtime, args);
@@ -520,6 +588,7 @@ export async function runTaskCommand(
 
     case "run": {
       const runtime = await openRuntimeFor(args, env);
+      requireProviderCredentials(runtime);
       const scope = readScope(runtime, args);
       const id = positionalTaskId(args);
       const stored = await runtime.tasks.load(scope, id);
@@ -534,6 +603,95 @@ export async function runTaskCommand(
       }
       // Zero only when the attempt reached review: anything else needs attention.
       return result.outcome === "awaiting-review" ? EXIT_OK : EXIT_FAILURE;
+    }
+
+    case "orchestrate": {
+      const runtime = await openRuntimeFor(args, env);
+      requireProviderCredentials(runtime);
+      const scope = readScope(runtime, args);
+      const id = positionalTaskId(args);
+      const stored = await runtime.tasks.load(scope, id);
+
+      // Context is *selected* here and passed to the model; what is recorded is the
+      // selection reference and its token count, never the file contents.
+      const selection = flagBool(args, "context")
+        ? await selectContextForTask(
+            {
+              context: runtime.context,
+              contextConfig: runtime.contextConfig,
+            },
+            stored.task,
+          )
+        : undefined;
+      if (selection?.selection.budgetExceeded === true) {
+        // Hard budget: mandatory context did not fit, so nothing is sent. Refusing
+        // here rather than trimming is the Phase E rule, and it means an over-budget
+        // selection can never turn into a model call.
+        io.err(
+          `error: context selection ${selection.selection.selectionId} exceeded its budget ` +
+            `(${selection.selection.selectedTokens}/${selection.selection.budgetTokens} tokens); ` +
+            `no model call was made`,
+        );
+        return EXIT_FAILURE;
+      }
+
+      // Consumption already recorded for this task, so the task budget is a hard
+      // bound across runs rather than a per-run limit.
+      const prior = await runtime.traces.read(scope, id);
+      const requiredCapabilities = flagValues(args, "require");
+      const requiredSpecializations = flagValues(args, "specialize");
+      const subTasks = flagValues(args, "subtask").map(
+        (instruction, index) => ({
+          id: `subtask-${index + 1}`,
+          instruction,
+          requiredCapabilities: ["reasoning"],
+        }),
+      );
+
+      const result = await runtime.orchestrator.run({
+        workspaceId: runtime.workspace.id,
+        taskId: id,
+        priorConsumption: {
+          tokens: prior.metrics.totalTokens,
+          costMicros: prior.metrics.cost.micros,
+          iterations: prior.metrics.llmCalls,
+        },
+        ...(selection === undefined
+          ? {}
+          : {
+              contextText: selection.bundle.items
+                .map((item) => item.content)
+                .join("\n\n"),
+              contextSelectionId: selection.selection.selectionId,
+              contextSelectionVersion: selection.selection.selectionVersion,
+              contextSelectedTokens: selection.selection.selectedTokens,
+            }),
+        ...(requiredCapabilities.length === 0 &&
+        requiredSpecializations.length === 0
+          ? {}
+          : {
+              requirements: {
+                ...(requiredCapabilities.length === 0
+                  ? {}
+                  : { requiredCapabilities }),
+                ...(requiredSpecializations.length === 0
+                  ? {}
+                  : { requiredSpecializations }),
+              },
+            }),
+        ...(subTasks.length === 0 ? {} : { subTasks }),
+      });
+
+      if (json) {
+        io.out(JSON.stringify(result, null, 2));
+      } else {
+        io.out(formatOrchestration(result));
+      }
+      // A run that stopped early or recommends review needs attention; a completed
+      // run that recommends none is a success.
+      return result.needsHumanReview || result.stopReason !== undefined
+        ? EXIT_FAILURE
+        : EXIT_OK;
     }
 
     case "approve": {

@@ -15,6 +15,9 @@ pnpm-debug.log*
 # env / secrets (never commit)
 .env
 .env.*
+# `.env.local` holds a developer's own credentials: ignored explicitly as well as by
+# the `.env.*` rule above, so it cannot be staged even if that rule is ever narrowed.
+.env.local
 !.env.example
 
 # local AI runtime state (event logs, task records) — never committed
@@ -33,4 +36,3 @@ pnpm-debug.log*
 .DS_Store
 Thumbs.db
 *.log
-
