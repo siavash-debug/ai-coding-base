@@ -72,6 +72,15 @@
   ],
   "modelRates": [
     {
+      "providerId": "tokenharbor",
+      "modelId": "qwen3.8-flash:free",
+      "currency": "USD",
+      "inputMicrosPerMillionTokens": 0,
+      "outputMicrosPerMillionTokens": 0,
+      "cachedInputMicrosPerMillionTokens": 0,
+      "effectiveFrom": "2026-01-01T00:00:00.000Z"
+    },
+    {
       "providerId": "deterministic",
       "modelId": "deterministic-1",
       "currency": "USD",
@@ -126,7 +135,8 @@
       "allowedHosts": [],
       "providerHosts": [
         "api.typesafe.ai",
-        "openrouter.ai"
+        "openrouter.ai",
+        "tokenharbor.ai"
       ]
     },
     "environment": {
@@ -151,9 +161,43 @@
         "credentialEnvVar": "OPENROUTER_API_KEY",
         "maxAttempts": 1,
         "timeoutMs": 60000
+      },
+      {
+        "id": "tokenharbor",
+        "kind": "openai-compatible",
+        "baseUrl": "https://tokenharbor.ai/v1",
+        "credentialEnvVar": "TOKENHARBOR_API_KEY",
+        "maxAttempts": 1,
+        "timeoutMs": 120000,
+        "streaming": true
       }
     ],
     "models": [
+      {
+        "modelId": "qwen3.8-flash:free",
+        "providerId": "tokenharbor",
+        "displayName": "Qwen3.8 Flash (TokenHarbor, free tier)",
+        "capabilities": [
+          "general",
+          "reasoning",
+          "coding"
+        ],
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "latencyClass": "standard",
+        "priority": 50,
+        "enabled": true,
+        "userOwned": true,
+        "health": "unknown",
+        "operational": {
+          "free": true,
+          "status": "active"
+        }
+      },
       {
         "modelId": "inclusionai/ling-3.0-flash-fin:free",
         "providerId": "openrouter",
@@ -176,7 +220,7 @@
         "structuredOutput": true,
         "latencyClass": "fast",
         "priority": 10,
-        "enabled": true,
+        "enabled": false,
         "userOwned": false,
         "health": "unknown",
         "operational": {
@@ -201,7 +245,7 @@
         ],
         "latencyClass": "standard",
         "priority": 0,
-        "enabled": true,
+        "enabled": false,
         "userOwned": false,
         "health": "unknown",
         "operational": {
@@ -226,7 +270,7 @@
         ],
         "latencyClass": "standard",
         "priority": 0,
-        "enabled": true,
+        "enabled": false,
         "userOwned": false,
         "health": "unknown",
         "operational": {
@@ -251,7 +295,7 @@
         ],
         "latencyClass": "standard",
         "priority": 0,
-        "enabled": true,
+        "enabled": false,
         "userOwned": false,
         "health": "unknown",
         "operational": {
@@ -276,7 +320,7 @@
         ],
         "latencyClass": "standard",
         "priority": 0,
-        "enabled": true,
+        "enabled": false,
         "userOwned": false,
         "health": "unknown",
         "operational": {
@@ -301,7 +345,7 @@
         ],
         "latencyClass": "standard",
         "priority": 0,
-        "enabled": true,
+        "enabled": false,
         "userOwned": false,
         "health": "unknown",
         "operational": {
@@ -329,7 +373,7 @@
         "structuredOutput": true,
         "latencyClass": "fast",
         "priority": 5,
-        "enabled": true,
+        "enabled": false,
         "userOwned": false,
         "health": "unknown",
         "operational": {
@@ -355,7 +399,7 @@
         ],
         "latencyClass": "standard",
         "priority": 0,
-        "enabled": true,
+        "enabled": false,
         "userOwned": false,
         "health": "unknown",
         "operational": {
@@ -381,7 +425,7 @@
         ],
         "latencyClass": "standard",
         "priority": 0,
-        "enabled": true,
+        "enabled": false,
         "userOwned": false,
         "health": "unknown",
         "operational": {
@@ -409,7 +453,7 @@
         "toolCalling": true,
         "latencyClass": "standard",
         "priority": 0,
-        "enabled": true,
+        "enabled": false,
         "userOwned": false,
         "health": "unknown",
         "operational": {
@@ -581,11 +625,11 @@
       }
     ],
     "routing": {
-      "mode": "balanced",
+      "mode": "quality",
       "allowDecomposition": false,
       "allowParallel": false,
       "maxModelCalls": 1,
-      "maxRetriesPerStep": 0
+      "maxRetriesPerStep": 1
     }
   }
 }
