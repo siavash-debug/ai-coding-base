@@ -4,7 +4,10 @@ import type {
   EvaluationLabel,
 } from "./decision-benchmark.js";
 import { stableCaseId } from "./decision-benchmark.js";
-import type { DecisionDomain, DomainDecisionSpec } from "../../src/decisions/domains.js";
+import type {
+  DecisionDomain,
+  DomainDecisionSpec,
+} from "../../src/decisions/domains.js";
 import {
   ALL_OPERATIONS,
   baselineRiskForOperation,
@@ -77,12 +80,16 @@ function unlabeled(): EvaluationLabel {
 const SPEC_FOR_DOMAIN_ROWS: readonly TestRow[] = [
   {
     domain: "routing",
-    question: 'Which execution route should task work at risk level "low" take?',
+    question:
+      'Which execution route should task work at risk level "low" take?',
     context: ["risk:low"],
     ranked: false,
     options: [
       { id: "standard", label: "Run the attempt as configured" },
-      { id: "minimal", label: "Run the attempt with the smallest operation set" },
+      {
+        id: "minimal",
+        label: "Run the attempt with the smallest operation set",
+      },
     ],
     reasonCodes: [
       "single-registered-route",
@@ -91,7 +98,10 @@ const SPEC_FOR_DOMAIN_ROWS: readonly TestRow[] = [
       "human-judgement-required",
     ],
     deterministic: noRule,
-    label: truthLabel("standard", "low-risk two-route question; standard serves the work"),
+    label: truthLabel(
+      "standard",
+      "low-risk two-route question; standard serves the work",
+    ),
     difficulty: "easy",
     signals: signals("test-derived:support", "2-options"),
   },
@@ -111,14 +121,18 @@ const SPEC_FOR_DOMAIN_ROWS: readonly TestRow[] = [
       "most-informative-tool",
     ],
     deterministic: noRule,
-    label: truthLabel("list-workspace-files", "support default is enumeration; a read needs a chosen target"),
+    label: truthLabel(
+      "list-workspace-files",
+      "support default is enumeration; a read needs a chosen target",
+    ),
     difficulty: "medium",
     note: "neither answer is wrong a priori; the support module names the first as default",
     signals: signals("test-derived:support", "2-options"),
   },
   {
     domain: "risk-assessment",
-    question: 'What contextual risk does operation "write" carry, beyond its "medium" baseline?',
+    question:
+      'What contextual risk does operation "write" carry, beyond its "medium" baseline?',
     context: ["op:write"],
     ranked: false,
     options: [
@@ -137,7 +151,10 @@ const SPEC_FOR_DOMAIN_ROWS: readonly TestRow[] = [
       "routine-change",
     ],
     deterministic: noRule,
-    label: truthLabel("medium", "bare write with no contextual signal stays at baseline"),
+    label: truthLabel(
+      "medium",
+      "bare write with no contextual signal stays at baseline",
+    ),
     difficulty: "easy",
     signals: signals("test-derived:support", "4-options"),
   },
@@ -161,14 +178,21 @@ const SPEC_FOR_DOMAIN_ROWS: readonly TestRow[] = [
       "deterministic-failure",
     ],
     deterministic: noRule,
-    label: truthLabel("retry", "5xx on the first attempt with full budget is the canonical retry"),
+    label: truthLabel(
+      "retry",
+      "5xx on the first attempt with full budget is the canonical retry",
+    ),
     difficulty: "easy",
     signals: signals("test-derived:support", "3-options"),
   },
   {
     domain: "completion",
     question: "Does the recorded evidence suggest this task is complete?",
-    context: ["criteria:2/2", "verification-checks:2", "verification-failures:0"],
+    context: [
+      "criteria:2/2",
+      "verification-checks:2",
+      "verification-failures:0",
+    ],
     ranked: false,
     options: [
       { id: "complete", label: "Evidence suggests the task is complete" },
@@ -184,7 +208,10 @@ const SPEC_FOR_DOMAIN_ROWS: readonly TestRow[] = [
       "no-verification-evidence",
     ],
     deterministic: noRule,
-    label: truthLabel("complete", "the support module's 'open question' state is full-criteria full-verification"),
+    label: truthLabel(
+      "complete",
+      "the support module's 'open question' state is full-criteria full-verification",
+    ),
     difficulty: "easy",
     signals: signals("test-derived:support", "3-options"),
   },
@@ -206,17 +233,24 @@ const SPEC_FOR_DOMAIN_ROWS: readonly TestRow[] = [
       "routine-outcome",
     ],
     deterministic: noRule,
-    label: truthLabel("review", "a failed verification is not a routine outcome"),
+    label: truthLabel(
+      "review",
+      "a failed verification is not a routine outcome",
+    ),
     difficulty: "easy",
     signals: signals("test-derived:support", "2-options"),
   },
   {
     domain: "execution-strategy",
-    question: "Should this medium-risk task be completed deterministically, executed with a model, or handed to a human?",
+    question:
+      "Should this medium-risk task be completed deterministically, executed with a model, or handed to a human?",
     context: ["risk:medium", "model-required:true", "eligible-models:2"],
     ranked: false,
     options: [
-      { id: "deterministic", label: "Complete it deterministically, with no model call" },
+      {
+        id: "deterministic",
+        label: "Complete it deterministically, with no model call",
+      },
       { id: "model", label: "Execute it with a model through Frontier" },
       { id: "human", label: "Hand it to a human before spending anything" },
     ],
@@ -240,12 +274,16 @@ const SPEC_FOR_DOMAIN_ROWS: readonly TestRow[] = [
   },
   {
     domain: "skill-selection",
-    question: "Which available skill, if any, is relevant to the current state?",
+    question:
+      "Which available skill, if any, is relevant to the current state?",
     context: ["state:(support module: no state context supplied)"],
     ranked: false,
     options: [
       { id: "code-review", label: "registered skill: code-review" },
-      { id: "no-skill", label: "No registered skill matches; proceed without one" },
+      {
+        id: "no-skill",
+        label: "No registered skill matches; proceed without one",
+      },
     ],
     reasonCodes: [
       "explicit-skill-match",
@@ -263,7 +301,10 @@ const SPEC_FOR_DOMAIN_ROWS: readonly TestRow[] = [
   {
     domain: "context-selection",
     question: "Should this context candidate be kept, dropped, or compressed?",
-    context: ["candidate:src/a.ts", "task:(support module: no task context supplied)"],
+    context: [
+      "candidate:src/a.ts",
+      "task:(support module: no task context supplied)",
+    ],
     ranked: false,
     options: [
       { id: "keep", label: "Keep the candidate in context" },
@@ -287,11 +328,18 @@ const SPEC_FOR_DOMAIN_ROWS: readonly TestRow[] = [
   {
     domain: "relevance",
     question: "Is the bounded candidate set relevant to this task?",
-    context: ["candidate:src/a.ts", "candidate:tests/a.test.ts", "task:(support module: no task context supplied)"],
+    context: [
+      "candidate:src/a.ts",
+      "candidate:tests/a.test.ts",
+      "task:(support module: no task context supplied)",
+    ],
     ranked: false,
     options: [
       { id: "relevant", label: "The candidate is relevant to the task" },
-      { id: "not-relevant", label: "The candidate is not relevant to the task" },
+      {
+        id: "not-relevant",
+        label: "The candidate is not relevant to the task",
+      },
     ],
     reasonCodes: [
       "explicitly-referenced",
@@ -308,13 +356,21 @@ const SPEC_FOR_DOMAIN_ROWS: readonly TestRow[] = [
   {
     domain: "ranking",
     question: "In what order should these candidates be considered?",
-    context: ["candidates:2", "task:(support module: no task context supplied)"],
+    context: [
+      "candidates:2",
+      "task:(support module: no task context supplied)",
+    ],
     ranked: true,
     options: [
       { id: "a", label: "A" },
       { id: "b", label: "B" },
     ],
-    reasonCodes: ["single-candidate", "ordered-by-relevance", "ordered-by-cost", "ordered-by-safety"],
+    reasonCodes: [
+      "single-candidate",
+      "ordered-by-relevance",
+      "ordered-by-cost",
+      "ordered-by-safety",
+    ],
     deterministic: noRule,
     label: unlabeled(),
     difficulty: "unlabeled",
@@ -330,7 +386,8 @@ const SPEC_FOR_DOMAIN_ROWS: readonly TestRow[] = [
 const GATE_SUITE_ROWS: readonly TestRow[] = [
   {
     domain: "routing",
-    question: 'Which execution route should task work at risk level "low" take?',
+    question:
+      'Which execution route should task work at risk level "low" take?',
     context: ["test:answers routing itself when one route is registered"],
     ranked: false,
     options: [{ id: "standard", label: "Run the attempt as configured" }],
@@ -340,7 +397,11 @@ const GATE_SUITE_ROWS: readonly TestRow[] = [
       "narrow-scope-preferred",
       "human-judgement-required",
     ],
-    deterministic: { kind: "clear", optionId: "standard", reasonCode: "single-registered-route" },
+    deterministic: {
+      kind: "clear",
+      optionId: "standard",
+      reasonCode: "single-registered-route",
+    },
     label: gateLabel("standard"),
     difficulty: "easy",
     signals: signals("test-derived:gate-suite", "1-option", "gate-clear"),
@@ -369,7 +430,12 @@ const GATE_SUITE_ROWS: readonly TestRow[] = [
   {
     domain: "retry",
     question: 'Should the attempt be retried after a "rate-limit" failure?',
-    context: ["test:stops a retry at the deterministic limit", "attempts-spent:2", "max-retries:2", "retries-remaining:5"],
+    context: [
+      "test:stops a retry at the deterministic limit",
+      "attempts-spent:2",
+      "max-retries:2",
+      "retries-remaining:5",
+    ],
     ranked: false,
     options: [
       { id: "retry", label: "Retry within the deterministic limits" },
@@ -385,7 +451,11 @@ const GATE_SUITE_ROWS: readonly TestRow[] = [
       "budget-exhausted",
       "deterministic-failure",
     ],
-    deterministic: { kind: "clear", optionId: "stop", reasonCode: "retry-limit-reached" },
+    deterministic: {
+      kind: "clear",
+      optionId: "stop",
+      reasonCode: "retry-limit-reached",
+    },
     label: gateLabel("stop"),
     difficulty: "easy",
     signals: signals("test-derived:gate-suite", "3-options", "gate-clear"),
@@ -393,7 +463,12 @@ const GATE_SUITE_ROWS: readonly TestRow[] = [
   {
     domain: "retry",
     question: 'Should the attempt be retried after a "rate-limit" failure?',
-    context: ["test:stops a retry at the deterministic limit", "attempts-spent:0", "max-retries:2", "retries-remaining:0"],
+    context: [
+      "test:stops a retry at the deterministic limit",
+      "attempts-spent:0",
+      "max-retries:2",
+      "retries-remaining:0",
+    ],
     ranked: false,
     options: [
       { id: "retry", label: "Retry within the deterministic limits" },
@@ -409,7 +484,11 @@ const GATE_SUITE_ROWS: readonly TestRow[] = [
       "budget-exhausted",
       "deterministic-failure",
     ],
-    deterministic: { kind: "clear", optionId: "stop", reasonCode: "budget-exhausted" },
+    deterministic: {
+      kind: "clear",
+      optionId: "stop",
+      reasonCode: "budget-exhausted",
+    },
     label: gateLabel("stop"),
     difficulty: "easy",
     signals: signals("test-derived:gate-suite", "3-options", "gate-clear"),
@@ -417,7 +496,12 @@ const GATE_SUITE_ROWS: readonly TestRow[] = [
   {
     domain: "retry",
     question: 'Should the attempt be retried after an "auth" failure?',
-    context: ["test:stops a retry at the deterministic limit", "attempts-spent:0", "max-retries:2", "retries-remaining:5"],
+    context: [
+      "test:stops a retry at the deterministic limit",
+      "attempts-spent:0",
+      "max-retries:2",
+      "retries-remaining:5",
+    ],
     ranked: false,
     options: [
       { id: "retry", label: "Retry within the deterministic limits" },
@@ -433,7 +517,11 @@ const GATE_SUITE_ROWS: readonly TestRow[] = [
       "budget-exhausted",
       "deterministic-failure",
     ],
-    deterministic: { kind: "clear", optionId: "stop", reasonCode: "failure-not-retryable" },
+    deterministic: {
+      kind: "clear",
+      optionId: "stop",
+      reasonCode: "failure-not-retryable",
+    },
     label: gateLabel("stop"),
     difficulty: "easy",
     signals: signals("test-derived:gate-suite", "3-options", "gate-clear"),
@@ -441,7 +529,12 @@ const GATE_SUITE_ROWS: readonly TestRow[] = [
   {
     domain: "retry",
     question: 'Should the attempt be retried after a "rate-limit" failure?',
-    context: ["test:stops a retry at the deterministic limit (open question)", "attempts-spent:0", "max-retries:2", "retries-remaining:2"],
+    context: [
+      "test:stops a retry at the deterministic limit (open question)",
+      "attempts-spent:0",
+      "max-retries:2",
+      "retries-remaining:2",
+    ],
     ranked: false,
     options: [
       { id: "retry", label: "Retry within the deterministic limits" },
@@ -458,14 +551,22 @@ const GATE_SUITE_ROWS: readonly TestRow[] = [
       "deterministic-failure",
     ],
     deterministic: noRule,
-    label: truthLabel("retry", "the test names this the genuinely open question; rate-limit is transient"),
+    label: truthLabel(
+      "retry",
+      "the test names this the genuinely open question; rate-limit is transient",
+    ),
     difficulty: "easy",
     signals: signals("test-derived:gate-suite", "3-options"),
   },
   {
     domain: "completion",
     question: "Does the recorded evidence suggest this task is complete?",
-    context: ["test:refuses to call a task complete on failed evidence", "criteria:1/2", "verification-checks:3", "verification-failures:1"],
+    context: [
+      "test:refuses to call a task complete on failed evidence",
+      "criteria:1/2",
+      "verification-checks:3",
+      "verification-failures:1",
+    ],
     ranked: false,
     options: [
       { id: "complete", label: "Evidence suggests the task is complete" },
@@ -480,7 +581,11 @@ const GATE_SUITE_ROWS: readonly TestRow[] = [
       "criteria-unclear",
       "no-verification-evidence",
     ],
-    deterministic: { kind: "clear", optionId: "incomplete", reasonCode: "verification-failed" },
+    deterministic: {
+      kind: "clear",
+      optionId: "incomplete",
+      reasonCode: "verification-failed",
+    },
     label: gateLabel("incomplete"),
     difficulty: "easy",
     signals: signals("test-derived:gate-suite", "3-options", "gate-clear"),
@@ -488,7 +593,11 @@ const GATE_SUITE_ROWS: readonly TestRow[] = [
   {
     domain: "completion",
     question: "Does the recorded evidence suggest this task is complete?",
-    context: ["test:refuses to call a task complete on failed evidence", "criteria:unmeasured/2", "verification-checks:0"],
+    context: [
+      "test:refuses to call a task complete on failed evidence",
+      "criteria:unmeasured/2",
+      "verification-checks:0",
+    ],
     ranked: false,
     options: [
       { id: "complete", label: "Evidence suggests the task is complete" },
@@ -503,7 +612,11 @@ const GATE_SUITE_ROWS: readonly TestRow[] = [
       "criteria-unclear",
       "no-verification-evidence",
     ],
-    deterministic: { kind: "clear", optionId: "uncertain", reasonCode: "no-verification-evidence" },
+    deterministic: {
+      kind: "clear",
+      optionId: "uncertain",
+      reasonCode: "no-verification-evidence",
+    },
     label: gateLabel("uncertain"),
     difficulty: "easy",
     signals: signals("test-derived:gate-suite", "3-options", "gate-clear"),
@@ -511,7 +624,11 @@ const GATE_SUITE_ROWS: readonly TestRow[] = [
   {
     domain: "human-escalation",
     question: "Should a human review this outcome before the task is closed?",
-    context: ["test:never delegates a security refusal", "fact:refused-operation", "security-refusal:true"],
+    context: [
+      "test:never delegates a security refusal",
+      "fact:refused-operation",
+      "security-refusal:true",
+    ],
     ranked: false,
     options: [
       { id: "review", label: "Recommend human review" },
@@ -525,7 +642,11 @@ const GATE_SUITE_ROWS: readonly TestRow[] = [
       "resource-boundary",
       "routine-outcome",
     ],
-    deterministic: { kind: "clear", optionId: "review", reasonCode: "security-refusal" },
+    deterministic: {
+      kind: "clear",
+      optionId: "review",
+      reasonCode: "security-refusal",
+    },
     label: gateLabel("review"),
     difficulty: "easy",
     signals: signals("test-derived:gate-suite", "2-options", "gate-clear"),
@@ -533,18 +654,31 @@ const GATE_SUITE_ROWS: readonly TestRow[] = [
   {
     domain: "ranking",
     question: "In what order should these candidates be considered?",
-    context: ["test:answers ranking itself for a single candidate", "candidates:1"],
+    context: [
+      "test:answers ranking itself for a single candidate",
+      "candidates:1",
+    ],
     ranked: true,
     options: [{ id: "only", label: "Only candidate" }],
-    reasonCodes: ["single-candidate", "ordered-by-relevance", "ordered-by-cost", "ordered-by-safety"],
-    deterministic: { kind: "clear", optionId: "only", reasonCode: "single-candidate" },
+    reasonCodes: [
+      "single-candidate",
+      "ordered-by-relevance",
+      "ordered-by-cost",
+      "ordered-by-safety",
+    ],
+    deterministic: {
+      kind: "clear",
+      optionId: "only",
+      reasonCode: "single-candidate",
+    },
     label: gateLabel("only"),
     difficulty: "easy",
     signals: signals("test-derived:gate-suite", "1-option", "gate-clear"),
   },
   {
     domain: "risk-assessment",
-    question: 'What contextual risk does operation "deploy" carry, beyond its "critical" baseline?',
+    question:
+      'What contextual risk does operation "deploy" carry, beyond its "critical" baseline?',
     context: ["test:treats an already-critical baseline as unraisable"],
     ranked: false,
     options: [
@@ -562,7 +696,11 @@ const GATE_SUITE_ROWS: readonly TestRow[] = [
       "irreversible-change",
       "routine-change",
     ],
-    deterministic: { kind: "clear", optionId: "critical", reasonCode: "baseline-risk" },
+    deterministic: {
+      kind: "clear",
+      optionId: "critical",
+      reasonCode: "baseline-risk",
+    },
     label: gateLabel("critical"),
     difficulty: "easy",
     signals: signals("test-derived:gate-suite", "4-options", "gate-clear"),
@@ -570,7 +708,11 @@ const GATE_SUITE_ROWS: readonly TestRow[] = [
   {
     domain: "completion",
     question: "Does the recorded evidence suggest this task is complete?",
-    context: ["test:distinguishes unmeasured criteria from zero met", "criteria:unmeasured/2", "verification-checks:1"],
+    context: [
+      "test:distinguishes unmeasured criteria from zero met",
+      "criteria:unmeasured/2",
+      "verification-checks:1",
+    ],
     ranked: false,
     options: [
       { id: "complete", label: "Evidence suggests the task is complete" },
@@ -586,7 +728,10 @@ const GATE_SUITE_ROWS: readonly TestRow[] = [
       "no-verification-evidence",
     ],
     deterministic: noRule,
-    label: truthLabel("uncertain", "criterion progress was never measured; the test exists to pin that wording"),
+    label: truthLabel(
+      "uncertain",
+      "criterion progress was never measured; the test exists to pin that wording",
+    ),
     difficulty: "medium",
     signals: signals("test-derived:gate-suite", "3-options"),
   },
@@ -625,7 +770,11 @@ function retryGateFor(input: {
   });
   return spec.deterministic === undefined
     ? noRule
-    : { kind: "clear", optionId: spec.deterministic.optionId, reasonCode: spec.deterministic.reasonCode };
+    : {
+        kind: "clear",
+        optionId: spec.deterministic.optionId,
+        reasonCode: spec.deterministic.reasonCode,
+      };
 }
 
 const RETRY_TAXONOMY_ROWS: readonly TestRow[] = DECISION_FAILURE_KINDS.flatMap(
@@ -646,11 +795,13 @@ const RETRY_TAXONOMY_ROWS: readonly TestRow[] = DECISION_FAILURE_KINDS.flatMap(
       "budget-exhausted",
       "deterministic-failure",
     ];
-    return ([
-      { attemptsSpent: 1, retriesRemaining: 3 },
-      { attemptsSpent: 3, retriesRemaining: 3 },
-      { attemptsSpent: 0, retriesRemaining: 0 },
-    ] as const).map(({ attemptsSpent, retriesRemaining }) => {
+    return (
+      [
+        { attemptsSpent: 1, retriesRemaining: 3 },
+        { attemptsSpent: 3, retriesRemaining: 3 },
+        { attemptsSpent: 0, retriesRemaining: 0 },
+      ] as const
+    ).map(({ attemptsSpent, retriesRemaining }) => {
       const deterministic = retryGateFor({
         failureKind,
         attemptsSpent,
@@ -694,37 +845,45 @@ const RETRY_TAXONOMY_ROWS: readonly TestRow[] = DECISION_FAILURE_KINDS.flatMap(
   },
 );
 
-const RISK_OPERATION_ROWS: readonly TestRow[] = ALL_OPERATIONS.map((operation) => {
-  const baseline = baselineRiskForOperation(operation);
-  const spec: DomainDecisionSpec = buildRiskAssessmentSpec({
-    operation,
-    baselineRisk: baseline,
-    context: [`op:${operation}`, "test-derived:operation-table"],
-  });
-  assertDomainDecisionSpec(spec);
-  return {
-    domain: "risk-assessment" as const,
-    question: spec.question,
-    context: spec.context,
-    ranked: false,
-    options: spec.options.map((option) => ({ id: option.id, label: option.label })),
-    reasonCodes: [...spec.reasonCodes],
-    deterministic:
-      spec.deterministic === undefined
-        ? noRule
-        : {
-            kind: "clear" as const,
-            optionId: spec.deterministic.optionId,
-            reasonCode: spec.deterministic.reasonCode,
-          },      label:
+const RISK_OPERATION_ROWS: readonly TestRow[] = ALL_OPERATIONS.map(
+  (operation) => {
+    const baseline = baselineRiskForOperation(operation);
+    const spec: DomainDecisionSpec = buildRiskAssessmentSpec({
+      operation,
+      baselineRisk: baseline,
+      context: [`op:${operation}`, "test-derived:operation-table"],
+    });
+    assertDomainDecisionSpec(spec);
+    return {
+      domain: "risk-assessment" as const,
+      question: spec.question,
+      context: spec.context,
+      ranked: false,
+      options: spec.options.map((option) => ({
+        id: option.id,
+        label: option.label,
+      })),
+      reasonCodes: [...spec.reasonCodes],
+      deterministic:
+        spec.deterministic === undefined
+          ? noRule
+          : {
+              kind: "clear" as const,
+              optionId: spec.deterministic.optionId,
+              reasonCode: spec.deterministic.reasonCode,
+            },
+      label:
         spec.deterministic === undefined
           ? unlabeled()
           : gateLabel(spec.deterministic.optionId),
       difficulty:
-        spec.deterministic === undefined ? ("unlabeled" as const) : ("easy" as const),
+        spec.deterministic === undefined
+          ? ("unlabeled" as const)
+          : ("easy" as const),
       signals: signals("test-derived:operation-table", "4-options"),
-  };
-});
+    };
+  },
+);
 
 const STRATEGY_MATRIX_ROWS: readonly TestRow[] = (
   [
@@ -753,7 +912,10 @@ const STRATEGY_MATRIX_ROWS: readonly TestRow[] = (
       question: spec.question,
       context: spec.context,
       ranked: false,
-      options: spec.options.map((option) => ({ id: option.id, label: option.label })),
+      options: spec.options.map((option) => ({
+        id: option.id,
+        label: option.label,
+      })),
       reasonCodes: [...spec.reasonCodes],
       deterministic:
         spec.deterministic === undefined
@@ -817,14 +979,20 @@ const COMPLETION_MATRIX_ROWS: readonly TestRow[] = (
       : failures === 0 && met === total
         ? truthLabel("complete", "all criteria met with passing checks")
         : failures === 0 && total > 0 && met === 0
-          ? truthLabel("incomplete", "no criteria met and checks pass only over finished work")
+          ? truthLabel(
+              "incomplete",
+              "no criteria met and checks pass only over finished work",
+            )
           : unlabeled();
   return {
     domain: "completion" as const,
     question: spec.question,
     context: spec.context,
     ranked: false,
-    options: spec.options.map((option) => ({ id: option.id, label: option.label })),
+    options: spec.options.map((option) => ({
+      id: option.id,
+      label: option.label,
+    })),
     reasonCodes: [...spec.reasonCodes],
     deterministic,
     label,
@@ -850,7 +1018,10 @@ const ESCALATION_FACT_ROWS: readonly TestRow[] = (
   const spec: DomainDecisionSpec = buildEscalationSpec({
     facts: [...facts],
     securityRefusal,
-    context: [...facts.map((fact) => `fact:${fact}`), "test-derived:escalation-facts"],
+    context: [
+      ...facts.map((fact) => `fact:${fact}`),
+      "test-derived:escalation-facts",
+    ],
   });
   assertDomainDecisionSpec(spec);
   return {
@@ -858,7 +1029,10 @@ const ESCALATION_FACT_ROWS: readonly TestRow[] = (
     question: spec.question,
     context: spec.context,
     ranked: false,
-    options: spec.options.map((option) => ({ id: option.id, label: option.label })),
+    options: spec.options.map((option) => ({
+      id: option.id,
+      label: option.label,
+    })),
     reasonCodes: [...spec.reasonCodes],
     deterministic:
       spec.deterministic === undefined

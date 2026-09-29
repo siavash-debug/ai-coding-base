@@ -33,12 +33,18 @@ export const INIT_SPECS: readonly FlagSpec[] = [
     description:
       "rewrite an existing .ai/project.json (never touches the event log)",
   },
+  {
+    name: "dry-run",
+    value: false,
+    description:
+      "validate and report what would be written, without creating anything",
+  },
   { name: "json", value: false, description: "emit machine-readable JSON" },
   { name: "help", value: false, aliases: ["h"], description: "show this help" },
 ];
 
 export const INIT_USAGE =
-  "ai init [--name <name>] [--slug <slug>] [--force] [--json]";
+  "ai init [--name <name>] [--slug <slug>] [--force] [--dry-run] [--json]";
 
 /** Derives a legal project slug from a directory name. */
 export function deriveSlug(directory: string): string {
@@ -66,18 +72,21 @@ export async function runInit(
   const name = flagValue(args, "name") ?? directory;
   const slug = flagValue(args, "slug") ?? deriveSlug(directory);
 
+  const dryRun = flagBool(args, "dry-run");
   const result = await initializeProject({
     projectRoot: env.cwd,
     name,
     slug,
     clock: env.clock,
     ...(flagBool(args, "force") ? { force: true } : {}),
+    ...(dryRun ? { dryRun: true } : {}),
   });
 
   if (flagBool(args, "json")) {
     io.out(
       JSON.stringify(
         {
+          dryRun,
           configPath: result.configPath,
           project: result.config.project,
           workspaces: result.config.workspaces,
@@ -90,13 +99,23 @@ export async function runInit(
     return EXIT_OK;
   }
 
-  io.out(`Initialised project "${result.config.project.slug}"`);
+  io.out(
+    dryRun
+      ? `Dry run: would initialise project "${result.config.project.slug}"`
+      : `Initialised project "${result.config.project.slug}"`,
+  );
   io.out(`  project    ${result.config.project.id}`);
   io.out(`  workspace  ${result.config.workspaces[0].id}`);
-  io.out(`  config     ${result.configPath}`);
+  io.out(
+    dryRun
+      ? `  config     ${result.configPath} (not written)`
+      : `  config     ${result.configPath}`,
+  );
   io.out("");
-  io.out("Next:");
-  io.out("  ai doctor");
-  io.out('  ai task create --title "My first task" --description "..."');
+  io.out(dryRun ? "Nothing was written (dry run)." : "Next:");
+  if (!dryRun) {
+    io.out("  ai doctor");
+    io.out('  ai task create --title "My first task" --description "..."');
+  }
   return EXIT_OK;
 }

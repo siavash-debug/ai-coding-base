@@ -56,7 +56,11 @@ export async function selectContextForTask(
     readonly contextConfig: ContextConfig;
   },
   task: Task,
-  options?: { readonly sessionId?: SessionId },
+  options?: {
+    readonly sessionId?: SessionId;
+    /** `false` computes the selection without recording it. See the port. */
+    readonly record?: boolean;
+  },
 ): Promise<{
   readonly selection: ContextSelection;
   readonly bundle: ContextBundle;
@@ -69,6 +73,7 @@ export async function selectContextForTask(
     ...(options?.sessionId === undefined
       ? {}
       : { sessionId: options.sessionId }),
+    ...(options?.record === undefined ? {} : { record: options.record }),
     correlationId: taskCorrelationId(task.projectId, task.workspaceId, task.id),
   });
 }

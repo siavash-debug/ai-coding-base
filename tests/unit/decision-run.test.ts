@@ -1,20 +1,27 @@
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createManualClock } from "../../src/core/clock.js";
+import { createFixedClock, createManualClock } from "../../src/core/clock.js";
 import type { DomainEvent } from "../../src/observability/events.js";
-import type { DecisionProvider } from "../../src/decisions/provider.js";
+import type {
+  DecisionProvider,
+  DecisionRequest,
+  DecisionResponse,
+} from "../../src/decisions/provider.js";
 import {
+  FIXTURE_INSTANT,
   accessPolicy,
   createEnforcementFixture,
   readWritePolicy,
   type EnforcementFixture,
 } from "../support/policy.js";
+import { markAcceptanceCriterion } from "../../src/tasks/task.js";
 import {
   createScriptedDecisionProvider,
   decisionProviderFailure,
   SCRIPTED_TOOLS,
 } from "../support/decisions.js";
 import { createFakeProvider, providerFailure } from "../support/llm.js";
+import { DECISION_KINDS } from "../../src/decisions/decision.js";
 import {
   FIXED_INSTANT,
   createTestProject,
@@ -62,6 +69,54 @@ function scopeOf(subject: EnforcementFixture) {
 
 function types(events: readonly DomainEvent[]): readonly string[] {
   return events.map((event) => event.type);
+}
+
+/**
+ * A decision layer that answers by *question kind* rather than in sequence.
+ *
+ * `runTask` asks a sequence whose length depends on which questions deterministic code
+ * can answer on its own, so an ordered script would couple a test to that sequence. A
+ * kind-keyed responder keeps the test about the gate, and records every question so a
+ * test can assert which ones were asked at all — which is the only way to observe that
+ * a withheld completion verdict is what pulls the escalation question into existence.
+ */
+function responderByKind(
+  overrides: Partial<Record<string, DecisionResponse>>,
+): {
+  readonly provider: DecisionProvider;
+  readonly asked: readonly DecisionRequest[];
+} {
+  const asked: DecisionRequest[] = [];
+  return {
+    asked,
+    provider: {
+      id: "kind-keyed-decisions",
+      family: "rules",
+      capabilities: () => ({
+        kinds: DECISION_KINDS,
+        deterministic: false,
+        maxOptions: 8,
+      }),
+      async decide(request: DecisionRequest): Promise<DecisionResponse> {
+        asked.push(request);
+        const override = overrides[request.kind];
+        if (override !== undefined) {
+          return override;
+        }
+        const first = request.options[0];
+        if (first === undefined) {
+          return { outcome: "abstained", reason: "no options offered" };
+        }
+        return request.ranked === true
+          ? {
+              outcome: "selected",
+              optionId: first.id,
+              rankedOptionIds: request.options.map((option) => option.id),
+            }
+          : { outcome: "selected", optionId: first.id };
+      },
+    },
+  };
 }
 
 /** The decisions a task's trace actually records, by kind. */
@@ -231,6 +286,86 @@ describe("run: a decision layer drives bounded choices", () => {
           "retry-limit-reached",
       ),
     ).toBe(true);
+  });
+});
+
+/**
+ * The completion confidence gate inside a real `ai task run`.
+ *
+ * This path differs from orchestration in one way that matters: the escalation question
+ * is asked *only* when the completion assessment is not `complete`, so a withheld
+ * verdict is what makes a human part of the run rather than a detail after it.
+ */
+describe("run: the completion confidence gate", () => {
+  it("asks a human about a completion verdict it is not confident enough to act on", async () => {
+    // The fixture task declares one criterion and never assesses it, so the evidence is
+    // `unmeasured`: `verification-passed` is a claim the recorded checks can support,
+    // while `criteria-met` is not offered for that shape at all (ADR-061).
+    const decision = responderByKind({
+      completion: {
+        outcome: "selected",
+        optionId: "complete",
+        reasonCode: "verification-passed",
+        confidence: 0.6,
+      },
+      "human-escalation": {
+        outcome: "selected",
+        optionId: "review",
+        reasonCode: "insufficient-evidence",
+      },
+    });
+    const subject = await fixture({
+      policy: readWritePolicy(),
+      decisionProvider: decision.provider,
+    });
+    const result = await subject.runtime.runTask.run(subject.task);
+
+    expect(result.outcome).toBe("awaiting-review");
+    // The layer said "complete"; the platform did not act on it...
+    expect(result.completionAssessment).toBe("uncertain");
+    expect(result.escalation).toBe("review");
+    // ...and saying so is what brought a human in: the escalation question exists here
+    // only because the verdict was withheld.
+    expect(
+      decision.asked.some((request) => request.kind === "human-escalation"),
+    ).toBe(true);
+    expect(
+      result.messages.some(
+        (message) =>
+          message.includes('answered "complete"') &&
+          message.includes("withheld"),
+      ),
+    ).toBe(true);
+
+    // The answer itself is still in the record, at the confidence it was given with:
+    // the gate withholds a verdict, it does not rewrite one.
+    const completion = (await decisionsOf(subject)).find(
+      (decisionRecord) => decisionRecord.kind === "completion",
+    );
+    expect(completion?.selectedOptionId).toBe("complete");
+    expect(completion?.confidence).toBe(0.6);
+  });
+
+  it("does not ask about escalation when it is confident the task is done", async () => {
+    const decision = responderByKind({
+      completion: {
+        outcome: "selected",
+        optionId: "complete",
+        reasonCode: "verification-passed",
+        confidence: 0.97,
+      },
+    });
+    const subject = await fixture({
+      policy: readWritePolicy(),
+      decisionProvider: decision.provider,
+    });
+    const result = await subject.runtime.runTask.run(subject.task);
+
+    expect(result.completionAssessment).toBe("complete");
+    expect(result.escalation).toBeUndefined();
+    expect(
+      decision.asked.some((request) => request.kind === "human-escalation"),
+    ).toBe(false);
   });
 });
 
@@ -501,5 +636,95 @@ describe("run: a decision layer cannot gain authority", () => {
     expect(events.map((event) => event.type)).not.toContain(
       "DecisionFallbackUsed",
     );
+  });
+});
+
+/**
+ * The completion question's two inputs.
+ *
+ * The runtime may only report criterion evidence it actually has, and it must not
+ * lose the completion consultation to the advisory questions that come before it.
+ * Those two properties are what let a human read a completion verdict and trust it.
+ */
+describe("run: acceptance evidence and the completion consultation", () => {
+  it("reports unmeasured criteria as unknown, never as zero met", async () => {
+    const decision = responderByKind({});
+    const subject = await fixture({
+      policy: readWritePolicy(),
+      decisionProvider: decision.provider,
+    });
+    const result = await subject.runtime.runTask.run(subject.task);
+    expect(result.outcome).toBe("awaiting-review");
+
+    // A verification step ran and passed, yet no criterion was assessed, so the
+    // runtime reports the criterion as *unmeasured* — not as satisfied (which would
+    // be manufacturing evidence) and not as zero met (which would be a lie).
+    const completion = decision.asked.find(
+      (request) => request.kind === "completion",
+    );
+    expect(completion).toBeDefined();
+    expect(completion?.context).toContain("criteria:unmeasured/1");
+    expect(
+      completion?.context.some((entry) =>
+        entry.startsWith("verification-checks:"),
+      ),
+    ).toBe(true);
+  });
+
+  it("carries a criterion-level assessment to the completion question", async () => {
+    const decision = responderByKind({});
+    const clock = createFixedClock(FIXTURE_INSTANT);
+    const subject = await fixture({
+      policy: readWritePolicy(),
+      decisionProvider: decision.provider,
+      clock,
+    });
+
+    // `markAcceptanceCriterion` is the only producer of criterion-level evidence: a
+    // human or a named step asserts it, and the assertion is recorded. Nothing infers
+    // it from the verification result.
+    const marked = markAcceptanceCriterion(
+      subject.task.task,
+      "AC-1",
+      "met",
+      clock,
+    );
+    const version = await subject.runtime.repository.save(
+      scopeOf(subject),
+      marked,
+      { expectedVersion: subject.task.version },
+    );
+    await subject.runtime.runTask.run({ version, task: marked });
+
+    const completion = decision.asked.find(
+      (request) => request.kind === "completion",
+    );
+    expect(completion?.context).toContain("criteria:1/1");
+  });
+
+  it("asks the completion question even when earlier decisions spend the budget", async () => {
+    const decision = responderByKind({});
+    const subject = await fixture({
+      policy: readWritePolicy(),
+      decisionProvider: decision.provider,
+      // Two consultations is enough for routing plus one per-step risk question, so
+      // without a reserved closing slot the completion question would be starved —
+      // the exact shape the real coding run hit.
+      decision: {
+        provider: "disabled",
+        maxDecisionsPerTask: 2,
+        maxRetriesPerTask: 1,
+      },
+    });
+    const result = await subject.runtime.runTask.run(subject.task);
+    expect(result.outcome).toBe("awaiting-review");
+
+    expect(
+      decision.asked.some((request) => request.kind === "completion"),
+    ).toBe(true);
+    const completion = (await decisionsOf(subject)).find(
+      (record) => record.kind === "completion",
+    );
+    expect(completion?.answeredBy).toBe("provider");
   });
 });

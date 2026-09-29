@@ -209,6 +209,29 @@ export interface Orchestrator {
   readonly strategy: string;
   readonly config: OrchestrationConfig;
   run(request: OrchestrationRequest): Promise<OrchestrationResult>;
+  plan(request: OrchestrationRequest): Promise<OrchestrationPlan>;
+}
+
+/**
+ * What an orchestration dry run can establish without executing.
+ *
+ * Not an `OrchestrationResult`: no session, no steps run, no usage, no stop reason —
+ * because nothing was attempted. It carries the deterministic plan: the extracted
+ * requirements, the models the registry considers eligible, the models it rejected
+ * and why, and the plan variants the mode and configuration permit.
+ */
+export interface OrchestrationPlan {
+  readonly taskId: TaskId;
+  readonly workspaceId: WorkspaceId;
+  readonly taskStatus: Task["status"];
+  readonly requirements: TaskRequirements;
+  readonly eligibleModelIds: readonly string[];
+  readonly rejectedModels: readonly {
+    readonly modelId: string;
+    readonly reasonCode: string;
+    readonly missing: readonly string[];
+  }[];
+  readonly variants: readonly PlanVariant[];
 }
 
 const ORCHESTRATOR_ACTOR = {
@@ -283,6 +306,71 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   return {
     strategy: ORCHESTRATION_STRATEGY,
     config: deps.config,
+
+    /**
+     * A dry run: build the plan and stop before anything is attempted.
+     *
+     * The boundary is `deps.tasks.start` (which records `TaskStarted`) and the
+     * `deps.sessions.start` that follows; this method reaches neither. It never asks
+     * the decision layer whether to strategize, and never calls a model. The task is
+     * loaded read-only, and requirements, eligibility and plan variants are pure
+     * functions of the task contract and the registry.
+     */
+    async plan(request) {
+      if (!deps.config.enabled) {
+        throw new DomainError(
+          "CONFLICT",
+          "frontier orchestration is not enabled for this project; set frontier.enabled in .ai/project.json to opt in",
+          { field: "frontier.enabled" },
+        );
+      }
+
+      const scope = {
+        projectId: deps.projectId,
+        workspaceId: request.workspaceId,
+      };
+      const loaded = await deps.tasks.load(scope, request.taskId);
+      const status = loaded.task.status;
+      if (
+        status === "completed" ||
+        status === "failed" ||
+        status === "cancelled"
+      ) {
+        throw new DomainError(
+          "CONFLICT",
+          `task "${String(request.taskId)}" is ${status} and cannot be orchestrated`,
+          { field: "taskId" },
+        );
+      }
+      const task = loaded.task;
+      const requirements = extractRequirements(
+        task,
+        request.requirements ?? {},
+      );
+      const report = deps.registry.eligible(requirements.modelRequirements);
+      const variants = buildPlanVariants({
+        taskId: String(task.id),
+        taskTitle: task.title,
+        requirements,
+        mode: deps.config.mode,
+        allowDecomposition: deps.config.allowDecomposition,
+        allowParallel: deps.config.allowParallel,
+        maxSteps: deps.config.maxModelCalls,
+        rankFor,
+        ...(request.subTasks === undefined
+          ? {}
+          : { subTasks: request.subTasks }),
+      });
+      return {
+        taskId: task.id,
+        workspaceId: task.workspaceId,
+        taskStatus: task.status,
+        requirements,
+        eligibleModelIds: report.eligible.map((model) => model.modelId),
+        rejectedModels: report.rejected,
+        variants,
+      };
+    },
 
     async run(request) {
       if (!deps.config.enabled) {
@@ -888,13 +976,20 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           `completion:${completion.assessment}`,
           `budget:${budgetState.level}`,
           `unpriced-calls:${unpricedCalls}`,
+          ...(completion.confidenceGated
+            ? [`completion-confidence-below-minimum:${completion.confidence}`]
+            : []),
           ...(stopped === undefined ? [] : [`stop:${stopped}`]),
         ],
       });
 
+      // A withheld completion verdict is itself a reason for review, alongside the
+      // escalation answer rather than instead of it: the gate exists so that an
+      // uncertain "done" reaches a human even when nothing else asks for one.
       const needsHumanReview =
         escalation.recommendation === "review" ||
         securityRefusal ||
+        completion.confidenceGated ||
         failedSteps > 0;
 
       await deps.sessions.end(

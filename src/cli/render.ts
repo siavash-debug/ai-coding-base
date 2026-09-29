@@ -14,6 +14,7 @@ import type {
   DecisionConfig,
   FrontierConfig,
 } from "../adapters/config/project-config.js";
+import type { ModelAvailability } from "../models/model.js";
 import type { ModelRegistry } from "../models/registry.js";
 import type { OrchestrationResult } from "../orchestration/orchestrator.js";
 import type { ContextSelection } from "../context/selection.js";
@@ -79,6 +80,36 @@ export function formatBudget(budget: BudgetEvaluation): readonly string[] {
   return lines;
 }
 
+/**
+ * Where a criterion's status came from, in the smallest form that answers the question.
+ *
+ * A status has exactly one source (`tasks/task.ts`), and this is the operator-facing half
+ * of that invariant: `by <name>` means a person asserted it, `verified: <suite>` means the
+ * verification the criterion named decided it, and nothing at all means the criterion is
+ * still unmeasured. Without this a reader could not tell a waiver from a passing check,
+ * which is the difference between a criterion that was tested and one that was set aside.
+ */
+function criterionSource(
+  criterion: StoredTask["task"]["acceptanceCriteria"][number],
+): string {
+  if (criterion.verdictBy !== undefined) {
+    return `  (by ${criterion.verdictBy})`;
+  }
+  // A `pending` criterion has no source, and showing its binding here would read as
+  // though the verification had already run.
+  if (criterion.status === "pending") {
+    return "";
+  }
+  if (criterion.verifiedBy !== undefined) {
+    const check =
+      criterion.verifiedBy.check === undefined
+        ? ""
+        : `#${criterion.verifiedBy.check}`;
+    return `  (verified: ${criterion.verifiedBy.suite}${check})`;
+  }
+  return "";
+}
+
 export function formatTask(stored: StoredTask): string {
   const { task } = stored;
   const met = task.acceptanceCriteria.filter(
@@ -101,7 +132,8 @@ export function formatTask(stored: StoredTask): string {
   ];
   for (const criterion of task.acceptanceCriteria) {
     lines.push(
-      `             [${criterion.status}] ${criterion.id} ${criterion.statement}`,
+      `             [${criterion.status}] ${criterion.id} ${criterion.statement}` +
+        criterionSource(criterion),
     );
   }
   return lines.join("\n");
@@ -979,6 +1011,8 @@ export function formatDecisionLayer(input: {
     `  provider        ${configured ? `"${input.info.providerId}" (${input.info.providerFamily ?? "unknown"})` : `disabled (${input.config.provider})`}`,
     `  configured      ${configured ? (input.info.deterministic === true ? "deterministic provider" : "non-deterministic provider") : "no decision engine installed for this project"}`,
     `  budget          ${input.config.maxDecisionsPerTask} consultation(s) per task, up to ${input.config.maxRetriesPerTask} attempt-level retr(ies)`,
+    `  completion gate ${input.config.minCompletionConfidence} — a "complete" verdict below this confidence is withheld and reviewed by a human`,
+
     `  kinds offered   ${(input.info.kinds ?? []).join(", ") || "(none)"}`,
     `  answers refused ${input.failures} failed consultation(s), ${input.fallbacks} fallback answer(s)`,
     "",
@@ -1101,6 +1135,15 @@ export function formatFrontierModels(input: {
   readonly registry: ModelRegistry;
   readonly config: FrontierConfig;
   readonly providers: readonly string[];
+  /**
+   * Availability already judged by the caller, keyed by model id.
+   *
+   * Passed in rather than computed here: deciding whether a window has opened is a rule
+   * about time, and this module owns presentation. Absence of an entry — or of the map
+   * itself — means no claim is made, and the line then reports the *declared* window
+   * without asserting whether it has opened.
+   */
+  readonly availability?: ReadonlyMap<string, ModelAvailability>;
 }): string {
   const reachable = new Set(input.providers);
   const lines = [
@@ -1113,8 +1156,15 @@ export function formatFrontierModels(input: {
   ];
   for (const model of input.registry.list()) {
     const operational = model.operational;
+    const availability = input.availability?.get(model.modelId);
     lines.push(
       `  ${model.modelId}  [${model.providerId}]  ${model.enabled ? "enabled" : "disabled"}  ${model.health}` +
+        // An enabled model whose window has not opened is a *pending* candidate, and
+        // saying so is the difference between a catalog that explains itself and one
+        // that reports a model as routable months before its vendor serves it.
+        (availability?.state === "not-yet-available"
+          ? "  (not yet available)"
+          : "") +
         (model.role === undefined ? "" : `  role ${model.role}`) +
         (operational?.status === undefined ? "" : `  ${operational.status}`) +
         (model.userOwned ? "  (operator-added)" : "") +
@@ -1140,6 +1190,11 @@ export function formatFrontierModels(input: {
         (operational?.sunsetAt === undefined
           ? ""
           : `; ends ${operational.sunsetAt}`) +
+        // Printed whenever declared, like `ends`: the window is knowledge the operator
+        // wrote down, and it stays readable after it has opened.
+        (operational?.availableFrom === undefined
+          ? ""
+          : `; available from ${operational.availableFrom}`) +
         (operational?.rateLimitClass === undefined
           ? ""
           : `; rate limit class ${operational.rateLimitClass}`),

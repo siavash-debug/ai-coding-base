@@ -91,7 +91,24 @@
     }
   ],
   "llm": {
-    "provider": "simulated"
+    "provider": "openai-compatible",
+    "baseUrl": "https://api.apmix.ai/v1",
+    "modelId": "deepseek-v4-flash-free",
+    "credentialEnvVar": "APMIX_API_KEY",
+    "maxAttempts": 2
+  },
+  "agent": {
+    "runner": "change-set",
+    "verification": {
+      "command": "node",
+      "args": [
+        "./node_modules/vitest/vitest.mjs",
+        "run",
+        "tests/unit/normalize-text.test.ts",
+        "--reporter=dot"
+      ],
+      "timeoutMs": 120000
+    }
   },
   "context": {
     "strategy": "deterministic",
@@ -112,6 +129,8 @@
     "capabilities": {
       "allowed": [
         "filesystem.read",
+        "filesystem.write",
+        "process.execute",
         "git.read"
       ],
       "denied": [],
@@ -121,11 +140,16 @@
       "readableRoots": [
         "."
       ],
-      "writableRoots": [],
+      "writableRoots": [
+        "src",
+        "tests"
+      ],
       "deniedPatterns": []
     },
     "process": {
-      "allowedCommands": [],
+      "allowedCommands": [
+        "node"
+      ],
       "deniedCommands": [],
       "maxTimeoutMs": 60000,
       "environmentAllowlist": []
@@ -136,7 +160,8 @@
       "providerHosts": [
         "api.typesafe.ai",
         "openrouter.ai",
-        "tokenharbor.ai"
+        "tokenharbor.ai",
+        "api.apmix.ai"
       ]
     },
     "environment": {
@@ -149,6 +174,7 @@
     "credentialEnvVar": "TYPESAFE_API_KEY",
     "maxDecisionsPerTask": 6,
     "maxRetriesPerTask": 1,
+    "minCompletionConfidence": 0.8,
     "timeoutMs": 30000
   },
   "frontier": {
@@ -167,6 +193,15 @@
         "kind": "openai-compatible",
         "baseUrl": "https://tokenharbor.ai/v1",
         "credentialEnvVar": "TOKENHARBOR_API_KEY",
+        "maxAttempts": 1,
+        "timeoutMs": 120000,
+        "streaming": true
+      },
+      {
+        "id": "apmix",
+        "kind": "openai-compatible",
+        "baseUrl": "https://api.apmix.ai/v1",
+        "credentialEnvVar": "APMIX_API_KEY",
         "maxAttempts": 1,
         "timeoutMs": 120000,
         "streaming": true
@@ -196,6 +231,57 @@
         "operational": {
           "free": true,
           "status": "active"
+        }
+      },
+      {
+        "modelId": "deepseek-v4-flash-free",
+        "providerId": "apmix",
+        "displayName": "DeepSeek V4 Flash Free (apmix, free plan)",
+        "capabilities": [
+          "general",
+          "reasoning",
+          "coding"
+        ],
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "latencyClass": "standard",
+        "priority": 60,
+        "enabled": true,
+        "userOwned": true,
+        "health": "unknown",
+        "operational": {
+          "free": true,
+          "status": "active"
+        }
+      },
+      {
+        "modelId": "gpt-6-luna-free",
+        "providerId": "apmix",
+        "displayName": "GPT 6 Luna Free (apmix, free plan, launch event)",
+        "capabilities": [
+          "general",
+          "reasoning",
+          "coding"
+        ],
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "latencyClass": "standard",
+        "priority": 60,
+        "enabled": true,
+        "userOwned": true,
+        "health": "unknown",
+        "operational": {
+          "free": true,
+          "status": "active",
+          "availableFrom": "2026-09-25T17:00:00.000Z"
         }
       },
       {

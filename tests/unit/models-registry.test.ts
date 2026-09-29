@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { createFixedClock } from "../../src/core/clock.js";
 import { projectId } from "../../src/core/ids.js";
 import { hasDomainErrorCode } from "../../src/core/errors.js";
 import {
@@ -14,6 +15,8 @@ import {
   isUsableHealth,
   latencyRank,
   lifecycleRank,
+  modelAvailability,
+  modelAvailabilityAt,
   modelSatisfies,
   roleOf,
   type ModelProfile,
@@ -704,5 +707,145 @@ describe("the vocabulary", () => {
     }
     expect(latencyRank("fast")).toBeLessThan(latencyRank("slow"));
     expect(projectId("prj").startsWith("prj")).toBe(true);
+  });
+});
+
+/**
+ * A vendor can announce a model before it serves it. The window is declared once and
+ * the model becomes routable on its own, so the tests are about the boundary, about
+ * what a closed window is *called* in a report, and about the two facts never being
+ * confused: an operator's refusal and a vendor's clock.
+ */
+describe("declared availability windows", () => {
+  const OPENS_AT = "2026-09-25T17:00:00.000Z";
+  const BEFORE = "2026-09-25T16:59:59.999Z";
+  const AFTER = "2026-09-25T17:00:00.001Z";
+
+  const gated = frontierModel({
+    modelId: "vendor/gated:free",
+    providerId: "openrouter",
+    displayName: "Gated Model",
+    capabilities: ["general", "reasoning"],
+    operational: { free: true, status: "active", availableFrom: OPENS_AT },
+  });
+
+  function profileWithOperational(operational: unknown): unknown {
+    return {
+      modelId: "vendor/model-a",
+      providerId: "openrouter",
+      displayName: "Model A",
+      capabilities: ["general"],
+      inputModalities: ["text"],
+      outputModalities: ["text"],
+      enabled: true,
+      operational,
+    };
+  }
+
+  it("validates the window as an instant, and refuses to choose a time of day", () => {
+    // A date would make the platform pick midnight UTC on the operator's behalf, and
+    // the window opens at the vendor's moment, not at a convenient one.
+    try {
+      assertModelProfile(
+        profileWithOperational({ availableFrom: "2026-09-25" }),
+      );
+      throw new Error("expected a validation error");
+    } catch (error) {
+      expect(hasDomainErrorCode(error, "VALIDATION")).toBe(true);
+    }
+
+    const profile = assertModelProfile(
+      profileWithOperational({ availableFrom: OPENS_AT }),
+    );
+    expect(profile.operational?.availableFrom).toBe(OPENS_AT);
+    // Absent stays absent: no window declared is the absence of a claim.
+    expect(
+      assertModelProfile(profileWithOperational({ free: true })).operational
+        ?.availableFrom,
+    ).toBeUndefined();
+  });
+
+  it("opens exactly at the declared instant", () => {
+    expect(modelAvailability(gated, BEFORE).state).toBe("not-yet-available");
+    expect(modelAvailability(gated, BEFORE).availableFrom).toBe(OPENS_AT);
+    expect(modelAvailability(gated, OPENS_AT).state).toBe("available");
+    expect(modelAvailability(gated, AFTER).state).toBe("available");
+  });
+
+  it("treats no declared window as no gate, at any instant", () => {
+    // A model with no window is available in 1970: absence is not a closed window.
+    expect(modelAvailability(TEXT_MODEL, "1970-01-01T00:00:00.000Z")).toEqual({
+      state: "available",
+    });
+  });
+
+  it("refuses to judge a window against an instant it cannot parse", () => {
+    // `NaN >= x` is `false`, which would read as *closed*: a verdict produced by
+    // arithmetic on garbage. Refusing is the only honest answer.
+    try {
+      modelAvailability(gated, "yesterday");
+      throw new Error("expected a validation error");
+    } catch (error) {
+      expect(hasDomainErrorCode(error, "VALIDATION")).toBe(true);
+    }
+  });
+
+  it("keeps a gated model out of the candidate set, and says why", () => {
+    const registry = createModelRegistry({
+      models: [gated, TEXT_MODEL],
+      clock: createFixedClock(BEFORE),
+    });
+    const report = registry.eligible(NO_REQUIREMENTS);
+    expect(report.eligible.map((model) => model.modelId)).toEqual([
+      TEXT_MODEL.modelId,
+    ]);
+    // Not `disabled`: the operator wants it, and the reason it is absent is a clock,
+    // which is a different thing to act on.
+    expect(
+      report.rejected.find((entry) => entry.modelId === gated.modelId)
+        ?.reasonCode,
+    ).toBe("not-available-yet");
+  });
+
+  it("admits the model once the instant has passed, with no operator act", () => {
+    const registry = createModelRegistry({
+      models: [gated],
+      clock: createFixedClock(OPENS_AT),
+    });
+    expect(
+      registry.eligible(NO_REQUIREMENTS).eligible.map((m) => m.modelId),
+    ).toEqual([gated.modelId]);
+  });
+
+  it("never turns on a model its operator turned off", () => {
+    // Both facts are declared, and each keeps its own meaning: the window opens, and
+    // the refusal still stands.
+    const registry = createModelRegistry({
+      models: [{ ...gated, enabled: false }],
+      clock: createFixedClock(AFTER),
+    });
+    const report = registry.eligible(NO_REQUIREMENTS);
+    expect(report.eligible).toEqual([]);
+    expect(report.rejected[0]?.reasonCode).toBe("disabled");
+  });
+
+  it("refuses a catalog it cannot judge, rather than closing every window", () => {
+    // Omitting the clock would otherwise answer "not available" forever about a model
+    // whose window may already have opened, so the gap is refused where it appears.
+    try {
+      createModelRegistry({ models: [gated, TEXT_MODEL] });
+      throw new Error("expected a validation error");
+    } catch (error) {
+      expect(hasDomainErrorCode(error, "VALIDATION")).toBe(true);
+    }
+    // A catalog with no gated model needs no time, and is not made to supply any.
+    expect(() => createModelRegistry({ models: [TEXT_MODEL] })).not.toThrow();
+  });
+
+  it("judges a whole catalog against one instant", () => {
+    const at = modelAvailabilityAt([gated, TEXT_MODEL], BEFORE);
+    expect(at.get(gated.modelId)?.state).toBe("not-yet-available");
+    expect(at.get(TEXT_MODEL.modelId)).toEqual({ state: "available" });
+    expect(at.size).toBe(2);
   });
 });

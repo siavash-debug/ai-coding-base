@@ -150,7 +150,11 @@ describe("openai-compatible provider: streaming", () => {
         {
           kind: "stream",
           frames: [
-            streamChunk({ id: "chatcmpl-9", model: "qwen-fixture", content: "Hel" }),
+            streamChunk({
+              id: "chatcmpl-9",
+              model: "qwen-fixture",
+              content: "Hel",
+            }),
             streamChunk({ content: "lo " }),
             streamChunk({ content: "world", finishReason: "stop" }),
             streamChunk({ noChoices: true, usage: {} }),
@@ -281,7 +285,9 @@ describe("openai-compatible provider: streaming failures", () => {
       stream: [
         {
           kind: "stream",
-          frames: [sseFrame({ usage: { prompt_tokens: 1, completion_tokens: 0 } })],
+          frames: [
+            sseFrame({ usage: { prompt_tokens: 1, completion_tokens: 0 } }),
+          ],
         },
       ],
     });
@@ -350,9 +356,9 @@ describe("openai-compatible provider: streaming failures", () => {
       ],
     });
 
-    expect((await failureOf(() => provider.complete(REQUEST))).failureKind).toBe(
-      "network",
-    );
+    expect(
+      (await failureOf(() => provider.complete(REQUEST))).failureKind,
+    ).toBe("network");
   });
 
   it("returns no partial answer when the stream dies after delivering text", async () => {
@@ -386,15 +392,20 @@ describe("openai-compatible provider: streaming failures", () => {
       ],
     });
 
-    expect((await failureOf(() => provider.complete(REQUEST))).failureKind).toBe(
-      "timeout",
-    );
+    expect(
+      (await failureOf(() => provider.complete(REQUEST))).failureKind,
+    ).toBe("timeout");
   });
 
   it("does not assume an untranslated stream error is retryable", async () => {
     const { provider } = streamingProvider({
       stream: [
-        { kind: "stream", frames: [], failAfter: 0, error: new TypeError("boom") },
+        {
+          kind: "stream",
+          frames: [],
+          failAfter: 0,
+          error: new TypeError("boom"),
+        },
       ],
     });
 
@@ -406,7 +417,12 @@ describe("openai-compatible provider: streaming failures", () => {
   it("keeps the credential out of a streaming failure", async () => {
     const { provider } = streamingProvider({
       stream: [
-        { kind: "stream", frames: [], failAfter: 0, error: new TypeError("boom") },
+        {
+          kind: "stream",
+          frames: [],
+          failAfter: 0,
+          error: new TypeError("boom"),
+        },
       ],
     });
 

@@ -120,7 +120,11 @@ export function groundTruthStatusOf(
 
 /** What the deterministic gate would answer, and whether it can. */
 export type DeterministicState =
-  | { readonly kind: "clear"; readonly optionId: string; readonly reasonCode: string }
+  | {
+      readonly kind: "clear";
+      readonly optionId: string;
+      readonly reasonCode: string;
+    }
   | { readonly kind: "no-applicable-rule" };
 
 /** The label: what the case should be scored against, and who says so. */
@@ -301,19 +305,15 @@ export function benchmarkDatasetAccounting(
     stateCounts.set(fingerprint, (stateCounts.get(fingerprint) ?? 0) + 1);
   }
   const duplicates = (counts: Map<string, number>): string[] =>
-    [...counts.entries()]
-      .filter(([, count]) => count > 1)
-      .map(([key]) => key);
+    [...counts.entries()].filter(([, count]) => count > 1).map(([key]) => key);
   return {
     schemaVersion: BENCHMARK_SCHEMA_VERSION,
     datasetVersion: BENCHMARK_DATASET_VERSION,
     totalCases: cases.length,
-    labeledCases: cases.filter(
-      (c) => c.evaluationLabel.kind === "labeled",
-    ).length,
-    unlabeledCases: cases.filter(
-      (c) => c.evaluationLabel.kind === "unlabeled",
-    ).length,
+    labeledCases: cases.filter((c) => c.evaluationLabel.kind === "labeled")
+      .length,
+    unlabeledCases: cases.filter((c) => c.evaluationLabel.kind === "unlabeled")
+      .length,
     domains,
     duplicateCaseIds: duplicates(idCounts),
     duplicateStateFingerprints: duplicates(stateCounts),
@@ -345,9 +345,7 @@ export function duplicateStateCaseIdsOf(
     bucket.push(c.caseId);
     byFingerprint.set(key, bucket);
   }
-  return [...byFingerprint.values()]
-    .filter((ids) => ids.length > 1)
-    .flat();
+  return [...byFingerprint.values()].filter((ids) => ids.length > 1).flat();
 }
 
 import { createHash } from "node:crypto";

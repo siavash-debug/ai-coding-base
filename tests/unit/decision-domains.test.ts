@@ -23,7 +23,9 @@ import {
   buildRiskAssessmentSpec,
   buildRoutingSpec,
   buildToolSelectionSpec,
+  DEFAULT_COMPLETION_CONFIDENCE_THRESHOLD,
   assertDomainDecisionSpec,
+  gateCompletionAssessment,
   interpretCompletion,
   interpretEscalation,
   interpretRanking,
@@ -753,3 +755,113 @@ function specFor(
       });
   }
 }
+
+/* ------------------------------------------------- completion confidence gate */
+
+/**
+ * The completion confidence gate.
+ *
+ * Completion is the one assessment whose answer *withholds* review, so it is the one
+ * place a low-confidence answer would do damage. These assertions are the contract the
+ * application relies on: a gated verdict is never `complete`, is never turned into
+ * `incomplete`, and nothing unmeasured is ever gated.
+ */
+describe("the completion confidence gate", () => {
+  const SPEC = buildCompletionSpec({
+    acceptanceCriteriaTotal: 1,
+    verificationChecks: 1,
+    verificationFailures: 0,
+    context: [],
+  });
+
+  function assessed(
+    overrides: Partial<DomainDecisionOutcome>,
+    minConfidence?: number,
+  ) {
+    return interpretCompletion(outcome(SPEC, overrides), META, minConfidence);
+  }
+
+  it("acts on a complete verdict at or above the threshold", () => {
+    for (const confidence of [
+      1,
+      0.9,
+      DEFAULT_COMPLETION_CONFIDENCE_THRESHOLD,
+    ]) {
+      const result = assessed({ selectedOptionId: "complete", confidence });
+      expect(result.assessment).toBe("complete");
+      expect(result.reportedAssessment).toBe("complete");
+      expect(result.confidenceGated).toBe(false);
+      expect(result.confidence).toBe(confidence);
+    }
+  });
+
+  it("withholds a complete verdict below the threshold", () => {
+    const result = assessed({ selectedOptionId: "complete", confidence: 0.65 });
+    expect(result.assessment).toBe("uncertain");
+    // The layer's own answer survives: the platform withheld the verdict, it did not
+    // deny that the layer gave one.
+    expect(result.reportedAssessment).toBe("complete");
+    expect(result.confidenceGated).toBe(true);
+    expect(result.confidence).toBe(0.65);
+  });
+
+  it("never turns a withheld complete verdict into incomplete", () => {
+    // "we are unsure" and "we know it is unfinished" are different facts, and a gate
+    // that conflated them would report a failure the evidence never showed.
+    const result = assessed({ selectedOptionId: "complete", confidence: 0 });
+    expect(result.assessment).toBe("uncertain");
+    expect(result.assessment).not.toBe("incomplete");
+  });
+
+  it("does not gate a verdict that carries no confidence", () => {
+    // An unmeasured confidence is not a low one: there is no measurement to judge, and
+    // this platform never reads an absent value as zero (ADR-035).
+    const result = assessed({ selectedOptionId: "complete" });
+    expect(result.assessment).toBe("complete");
+    expect(result.confidenceGated).toBe(false);
+    expect(result.confidence).toBeUndefined();
+  });
+
+  it("does not gate the assessments that already end in a human decision", () => {
+    for (const optionId of ["incomplete", "uncertain"] as const) {
+      for (const confidence of [0, 0.1, 0.5]) {
+        const result = assessed({ selectedOptionId: optionId, confidence });
+        expect(result.assessment).toBe(optionId);
+        expect(result.confidenceGated).toBe(false);
+      }
+    }
+  });
+
+  it("takes the threshold from its caller", () => {
+    const lenient = assessed(
+      { selectedOptionId: "complete", confidence: 0.4 },
+      0.25,
+    );
+    expect(lenient.assessment).toBe("complete");
+    expect(lenient.confidenceGated).toBe(false);
+
+    const strict = assessed(
+      { selectedOptionId: "complete", confidence: 0.4 },
+      0.95,
+    );
+    expect(strict.assessment).toBe("uncertain");
+    expect(strict.confidenceGated).toBe(true);
+  });
+
+  it("is a gate, not an oracle: it can only pass an answer through or withhold it", () => {
+    expect(gateCompletionAssessment("uncertain", undefined, 0.8)).toEqual({
+      assessment: "uncertain",
+      confidenceGated: false,
+    });
+    // A threshold cannot be satisfied into a *better* answer than the layer gave.
+    expect(gateCompletionAssessment("incomplete", 1, 0).assessment).toBe(
+      "incomplete",
+    );
+    // Exactly at the threshold passes: the boundary is inclusive, so a configured
+    // number behaves the way an operator reading it would expect.
+    expect(gateCompletionAssessment("complete", 0.5, 0.5)).toEqual({
+      assessment: "complete",
+      confidenceGated: false,
+    });
+  });
+});

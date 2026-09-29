@@ -24,7 +24,10 @@ import {
   type TrustedLiveSdkExecution,
 } from "../../src/decisions/provider.js";
 import { decisionId, projectId, workspaceId } from "../../src/core/ids.js";
-import { initializeProject, openRuntime } from "../../src/application/runtime.js";
+import {
+  initializeProject,
+  openRuntime,
+} from "../../src/application/runtime.js";
 import type { Environment } from "../../src/ports/environment.js";
 import { accessPolicy, allowingProviderHost } from "../support/policy.js";
 import { createFakeTransport, jsonResponse } from "../support/llm.js";

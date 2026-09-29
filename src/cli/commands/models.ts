@@ -1,3 +1,5 @@
+import { toIsoString } from "../../core/clock.js";
+import { modelAvailabilityAt } from "../../models/model.js";
 import type { FlagSpec } from "../args.js";
 import { flagBool, parseArgv } from "../args.js";
 import { openRuntimeFor } from "../context.js";
@@ -48,9 +50,17 @@ export async function runModelsCommand(
 
   const runtime = await openRuntimeFor(args, env);
   const reachable = new Set(runtime.frontierProviders);
-  const models = runtime.registry.list().map((model) => ({
+  const catalog = runtime.registry.list();
+  // One instant for the whole catalog, read from the runtime's own clock, so this
+  // listing cannot straddle a window that opens while it is being printed.
+  const availability = modelAvailabilityAt(
+    catalog,
+    toIsoString(runtime.clock.now()),
+  );
+  const models = catalog.map((model) => ({
     ...model,
     providerConfigured: reachable.has(model.providerId),
+    availability: availability.get(model.modelId),
   }));
 
   io.out(
@@ -73,6 +83,7 @@ export async function runModelsCommand(
           registry: runtime.registry,
           config: runtime.frontierConfig,
           providers: runtime.frontierProviders,
+          availability,
         }),
   );
   return EXIT_OK;

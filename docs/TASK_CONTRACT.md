@@ -349,6 +349,124 @@ An implementation that looks correct but fails an acceptance criterion is incomp
 
 ---
 
+## 8.1 Binding a Criterion to Named Verification Evidence
+
+A criterion may be **bound** to the verification evidence that decides it. A binding is an explicit
+claim by the task author — never an inference by the runtime — and it is the only way a criterion is
+assessed without a human asserting it.
+
+A binding names a verification **suite**, and optionally one **named check** inside that suite:
+
+```yaml
+acceptance_criteria:
+  - criterion: Valid CheckResult objects are accepted.
+    verified_by:
+      suite: unit
+      check: result-accepts-valid # optional; narrows to one named check
+  - criterion: All repository verification checks pass.
+    verified_by:
+      suite: verification-command # suite-only: the whole-suite verdict
+  - criterion: The design is reviewed by a human. # no binding: never machine-assessed
+```
+
+A criterion that is bound names exactly the evidence that decides it. An unrelated check that happens
+to pass or fail in the same suite is not evidence for it.
+
+### Rules
+
+- **Explicit only.** A criterion with no binding is never machine-assessed. It stays `pending` until a
+  human or an explicit step asserts it. A passing test that the criterion did not name is not evidence
+  that the criterion is met.
+- **A binding must name a suite.** An empty or missing suite would create a criterion that looks
+  machine-assessable but can never be assessed; that is rejected rather than silently accepted.
+- **Named checks are operator-declared.** A check id is authored in project configuration
+  (`agent.verification.checks[].id`) and referenced by the binding. It is never derived from command
+  output, exit code, position or timing, so it is a stable join key. Two checks may not share an id,
+  because an ambiguous id would let a result be mis-attributed to the wrong criterion.
+- **A named check is assessed alone.** When a binding names a `check`, only that check's own outcome is
+  used: an unrelated failing check in the same suite neither satisfies nor invalidates the criterion. A
+  binding that names only a suite keeps the suite's whole-suite verdict.
+- **A failure outranks a pass.** The bound evidence reporting any failing check makes the criterion
+  `not-met`; otherwise, if it reported at least one check, the criterion is `met`.
+- **No result is no evidence.** A bound suite or check that never ran, or a result with zero checks,
+  leaves the criterion `pending`. Evidence is never fabricated to satisfy a criterion.
+- **A human's status is final.** Only `pending` criteria are assessed. A status a human already set
+  (`met`, `not-met`, `waived`) is never overwritten by a later run. See _Human Verdicts_ below.
+
+### Human Verdicts
+
+A criterion no verification can decide is established by a person, explicitly and on the record:
+
+```text
+ai task verdict <task-id> --criterion AC-1 --status <met|not-met|waived> --by <name>
+```
+
+- **One action, three verdicts.** `met`, `not-met` and `waived` are the only statuses a person can
+  assert. `pending` is not a verdict: it is the state a task starts in, so there is no operation that
+  returns a criterion to it. The equivalent of "I was wrong" is another verdict, and the history shows
+  both.
+- **Named, never anonymous.** `--by` is required. A status established without a name behind it is the
+  anonymous assertion this path exists to prevent.
+- **A status has exactly one source.** A criterion carries the evidence a verification produced, or the
+  name of the person who decided, never both. A verdict _replaces_ the machine's evidence references,
+  because a `met` criterion whose provenance still said a check failed would be a record that argues
+  with itself. The author's `verified_by` binding stays: it records which evidence was _supposed_ to
+  decide the criterion, which is what makes a human overrule visible as one.
+- **A human may overrule a machine, and may change their own mind.** Machine assessment only ever
+  touches a `pending` criterion, so a verdict is final _against the machine_; a later verdict replaces
+  an earlier one, and each is recorded as its own transition.
+- **A verdict moves no lifecycle state.** It records one criterion's status and one event. It does not
+  assess, transition, close, or approve anything, and no run ever undoes it.
+- **A closed task refuses verdicts.** `completed`, `failed` and `cancelled` freeze their criteria.
+
+### Provenance
+
+Every automatic status is recorded with the evidence that produced it, so it is reproducible from the
+log alone and never relies on prose:
+
+- The criterion carries `verified_by` (declared by the author) and, once assessed, an `evidence`
+  reference list — the suite, the check (when bound to one), the outcome and the check counts.
+- The run records an acceptance-assessment event whose entries are `<criterion-id>:<status>:<suite>`, or
+  `<criterion-id>:<status>:<suite>:<check>` when the criterion was bound to a named check.
+- A status a person set is recorded the same way: the verdict carries who decided it, and the log holds
+  an acceptance-verdict event with the transition it made, so a reader can tell a verdict from a
+  verification result without prose.
+- The underlying verification result carries the suite name and, for a named check, that check's stable
+  id, so a reader can join the criterion's binding to exactly one deterministic result.
+
+The check id travels from configuration, through the criterion binding, to the recorded result — it is
+the same string at every step and is never re-derived. A criterion's status is thereby always
+attributable to exactly one of two authorities — a verification it named, or a person it names — and a
+reader can tell them apart: a human verdict is never presented as machine evidence, and machine evidence
+is never presented as a human decision.
+
+This history is not only a record a person can read: **the record is replayed against it**. `ai doctor`
+rebuilds every criterion's state from the two events above and reports a task record that disagrees — a
+status, a source or an evidence identity the log does not support — naming the criterion and both
+values. The check is read-only and never repairs the record to match the log: a record that cannot be
+rebuilt from its own history is corruption to be reported, not silently corrected (ADR-063).
+
+### Backward Compatibility
+
+Binding is additive and preserves all pre-existing behaviour:
+
+- A bare acceptance criterion (plain text) is unchanged: it has no binding and is never
+  machine-assessed.
+- A criterion bound to a suite only keeps the whole-suite verdict — the same result the platform
+  produced before named checks existed.
+- The whole-suite verification command is optional: a project may declare only named checks, and a
+  project that declares only a command simply records whole-suite evidence and no check ids.
+- The check field on a recorded verification result is optional; absent means a whole-suite result,
+  which is its pre-existing meaning.
+- No existing task, configuration, event or test expectation is invalidated by a criterion that omits
+  a binding.
+
+If a criterion cannot be bound to any verification — because only a human can judge it — that is not a
+compatibility problem: it stays `pending` until a person asserts it with `ai task verdict` (see _Human
+Verdicts_), rather than being machine-assessed or left looking unmeasured.
+
+---
+
 # 9. Verification Contract
 
 Every task must define how correctness will be verified.

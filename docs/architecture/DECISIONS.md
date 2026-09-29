@@ -1349,10 +1349,24 @@ fact, not an inference (ADR-028).
   never add one. Where a layer can only move in the conservative direction, the enforcement path does
   not depend on its answer being right.
 
+- **The platform itself withholds a `complete` verdict on confidence.** `complete` is the one answer
+  that _removes_ the human an `uncertain` verdict would have brought in, so it is the one answer the
+  platform refuses to act on below a configured confidence (`decision.minCompletionConfidence`,
+  default `0.8`; `gateCompletionAssessment`). A verdict below the threshold is downgraded to
+  `uncertain` — never to `incomplete`, because nothing was learned about whether the work is finished —
+  the layer's own answer and its confidence stay in the record beside it, and the escalation question
+  is asked exactly as it is for any other non-`complete` assessment. A verdict carrying _no_ confidence
+  is not gated at all: an unmeasured confidence is not a low one, and this platform never reads an
+  absent value as zero (ADR-035). The number is configuration because the right threshold is
+  domain-specific and belongs to whoever owns the consequences; the code owns only what the gate
+  _means_.
+
 **Consequences.** "Which layer decided this, and what did it actually change?" is answerable from the
 log, and no decision provider can close work a human has not reviewed. The cost is that a completion
 assessment is sometimes ignored by a deterministic gate that disagrees with it — which is the
-intended behaviour, not a defect.
+intended behaviour, not a defect — and that a layer whose confidence sits below the threshold will
+have every completion verdict withheld, which is visible as an escalation recommendation rather than
+as silence.
 
 **Alternatives rejected.** Letting a completion assessment drive a transition (inference as
 authority); treating an escalation recommendation as an approval request (a service could then create
@@ -1455,66 +1469,831 @@ widen the plan, which the recorded report shows).
 
 ---
 
+## ADR-057 — Availability is a declared window, judged by an injected clock
+
+**Context.** A vendor can announce a model before it serves it: apmix listed `gpt-6-luna-free`
+with a launch event starting hours later, and every request for it was refused with the code
+`event_not_started`. Its capabilities matched the task and its credential was good, so nothing in
+the catalog explained why routing to it was wrong — and the failure was expensive in a way that is
+easy to miss. `403` classifies as `auth`, `auth` is not retryable, and a non-retryable failure makes
+the retry question answer `stop`, so a task that selected the model **failed** instead of falling
+through to the next candidate. The only defence available was for an operator to remember to flip
+`enabled` at the right moment, which is a promise no configuration can keep. Meanwhile the model
+vocabulary already declines to read a clock: `sunsetAt` records announced decline without consulting
+one, and `models/model.ts` documents itself as pure — no configuration reading, no network, no
+environment, no clock.
+
+**Decision.** A profile may declare `operational.availableFrom`, and eligibility is judged against
+the instant supplied by the runtime's injected clock.
+
+- **`enabled` and the window are different facts, and neither rewrites the other.** `enabled` is the
+  operator's wish to route to the model; the window is when the vendor allows it. A closed window
+  never turns on a model its operator disabled, and a disabled model is reported as `disabled`
+  before its window is consulted at all — the first honest reason wins.
+- **A gated model is not a candidate, and the report says which.** It is rejected with
+  `not-available-yet`, deliberately not `disabled`, because the two call for opposite responses:
+  one is a decision to revisit, the other is a window that opens on its own.
+- **Time arrives as a parameter, so the vocabulary module stays pure.** `modelAvailability(model,
+now)` takes the instant and consults no clock, so a process replaying last week's trace judges the
+  window at the time it is replaying rather than the time it happens to be running. Validating the
+  _declared_ value is pure for the same reason: it checks the string is an ISO-8601 instant and
+  refuses a bare date, because midnight UTC is a time of day the vendor never announced.
+- **The clock is required exactly where it is used.** A catalog that declares no window needs no
+  clock, so a caller with nothing to gate is not made to supply time; a catalog that declares one and
+  arrives without a clock is refused at construction, because the alternative is silently closing
+  every window — including one that has already opened.
+- **The instant is read per question, not frozen at construction**, so a window that opens while a
+  process is running opens for that process too.
+- **Declared windows are reported, not only obeyed.** `ai models` prints the window and marks a
+  pending model `(not yet available)`; `ai doctor` names the enabled-but-not-yet-available models.
+  A catalog that stayed silent would report a model as routable months before its vendor serves it.
+
+**Consequences.** A launch-gated model is registered once, with its window, and becomes routable on
+its own: no operator act, no failed task, no spent call. A passed `availableFrom` is harmless, so a
+declaration is written once and never revisited. The cost is that eligibility is time-dependent — a
+fact about the world rather than a defect, since the plan a task builds depends on when the task ran,
+and the reason codes keep that visible instead of silent. Ordering keys remain declared knowledge: a
+window is a gate, never a score.
+
+**Alternatives rejected.** Flipping `enabled` by hand (a promise nobody keeps, and it erases the
+difference between "not yet" and "not wanted"); demoting a gated model in the ranking rather than
+gating it (a plan could still spend a call, and the call would still fail); resolving availability
+once at registry construction (right for a CLI, wrong the moment a process outlives the window it is
+waiting for); reading the clock inside `models/model.ts` (that module is pure by design, and passing
+the instant keeps it that way); accepting a bare date (it would make the platform choose a time of day
+on the vendor's behalf).
+
+---
+
+## ADR-058 — The frontier executes one step; code filters and the brain reorders
+
+**Status.** This ADR records an implementation that **already exists and is already in use**. It is
+written after the fact, because the layer was built without one: §33.1 listed multi-model orchestration
+as "queued, not started", §38.8 stated that there was no multi-model routing at all, and none of
+ADR-051–057 covers it. Nothing here authorises building anything; the build is done, and this is the
+record of what it decided.
+
+**Context.** Until this layer the platform had one LLM provider and one model id per project, and §38.8
+recorded that as a limit. Keeping it would have made every quality/cost/latency trade-off invisible: a
+second vendor, a free tier, or two models with different capabilities was configuration nobody could
+express, and a task needing both `vision` and `coding` had no way to say so. Two failure modes found in
+operation shaped the design. First, a gateway may _normalise_ the id it echoes back — `qwen3.8-flash:free`
+arrives as `qwen3.8-flash`, `deepseek-v4-flash-free` as `deepseek-v4-flash` — so a system that adopts the
+reported name silently repoints everything keyed on identity, and a priced model becomes unpriced for
+ever. Second, a vendor edge that closes a silent connection is indistinguishable from a slow model
+unless the transport reports _why_ it failed, which is what the failure taxonomy is for. The design
+constraint throughout was the one Phase G established: the decision layer owns bounded judgement, code
+owns certainty, and neither may leak into the other.
+
+**Decision.** Model routing is a two-stage pipeline with an explicit executor at the end.
+
+**Implemented.**
+
+- **Model identity is the requested id.** `ModelProfile` carries `modelId` and `providerId` as separate
+  axes, and the registry refuses a duplicate id at construction. The frontier returns the id the platform
+  _asked for_ as the identity and keeps the provider's own name beside it as `reportedModelId` only when
+  the two differ, so cost rates, events and traces key on one name and provenance on the other.
+- **The registry is knowledge, not authority** (`models/registry.ts`). Its whole surface is `id`, `list`,
+  `get`, `eligible`, `noteHealth`, `snapshot` — there is deliberately no `select`, `best` or `rank`,
+  because choosing belongs to the decision layer and permission belongs to policy. Ordering is
+  deterministic across machines (declared `priority` descending, then model id). `noteHealth` is
+  process-local by design and is never persisted: a transient rate limit must not become a permanent
+  configuration.
+- **Vendors are behind a port: `FrontierExecutor`** (`ports/frontier.ts`). A step request names a
+  `providerId` and a `modelId`; no vendor type appears in the signature, and the executor has no way to
+  express "try a different model", because a different model is a different request.
+- **Capability metadata is declared, never inferred.** Closed vocabularies for capabilities,
+  modalities, roles (`generative`/`retrieval`), specializations, latency class and lifecycle; a free
+  tier, a rate-limit class and an announced end date are declarations, and an undeclared value stays
+  unknown rather than defaulting to a convenient fact. A name is marketing copy, never a routing input.
+- **Filtering happens before selection, and selection never invents a capability.** `modelSatisfies` is a
+  total, deterministic predicate, and `registry.eligible()` rejects with stable codes in a fixed order:
+  `disabled`, then a declared availability window that has not opened, then observed `health:<state>`,
+  then role or capability mismatch. The plan builder ranks only what survived that filter.
+- **Planning is structural and bounded** (`orchestration/plan.ts`). Requirement extraction is a
+  deterministic classifier over closed vocabularies with operator overrides re-validated; task text never
+  changes a declared risk. The plan set is `plan:deterministic` (nothing needs a model),
+  `plan:single`, `plan:decomposed` (split along the modality seam) and `plan:parallel` (declared
+  independent sub-tasks only). A decomposition is offered only when no single model covers the
+  requirements, only when each half has candidates, and only when it still covers _everything_ the task
+  needs — a cheap plan that silently drops a required capability is the trade this platform refuses.
+- **Ordering keys are declared and mode-specific.** Four routing modes (`cost`, `latency`, `quality`,
+  `balanced`) compose an explicit key list, every tie is broken by model id, announced lifecycle decline
+  outranks every preference, and an unpriced model is ordered as _unknown_, never as free. Cost ordering
+  uses a fixed reference usage so comparability never depends on a live call, and that reference is never
+  recorded as the cost of anything.
+- **The decision layer may reorder, never extend.** The orchestrator ranks the eligible set, offers it to
+  the decision layer, and accepts the answer only as a permutation of what it offered; an unknown id is
+  rejected and the offered order stands. A retry with a permitted retry _rotates the fixed candidate set_
+  rather than widening the search.
+- **Execution is one bounded step per call**, with the budget re-evaluated before every call, an
+  `OrchestrationPlanned` event recorded before any call, and a call cap that is a hard bound. The step's
+  system instruction states that supplied context is untrusted material and that the model cannot grant
+  permissions, change budgets, alter scope or approve operations — the same boundary Phase E enforces on
+  the repository side.
+- **Streaming is a transport choice inside one adapter.** A provider may be configured `streaming: true`;
+  the adapter consumes Server-Sent Events and assembles the deltas into the same single response shape,
+  falling back to the buffered path when a provider cannot stream. It is not a second provider and not a
+  second code path for accounting.
+- **Retry is a decision, and the taxonomy is what makes it one.** Only `rate-limit`, `timeout`, `network`
+  and `server` are retryable; `auth` and policy refusals never are, because repeating either repeats the
+  same refusal. An empty or whitespace-only completion is classified as `malformed-response` on the shared
+  failure path, so it reaches the retry and completion questions as _evidence that nothing was produced_
+  rather than as a step that quietly verified itself.
+- **Identity and cost are observable after the fact.** `LLMRequestStarted`/`Completed`/`Failed` carry
+  provider, model, usage, latency, retries and the provider's request id; the plan event carries the
+  strategy, reason code, the models deterministic ranking _would_ use, the call cap and the candidate and
+  rejected lists; each step report carries status, attempts, latency, usage, cost, finish reason,
+  selection reason and the ranked candidates it chose between. Prompts, completions and context content
+  are never event payloads. `ai doctor` audits recorded plans for internal consistency.
+- **Configuration is per project and bounded.** `frontier.providers` (at most 8) and `frontier.models`
+  (at most 32) with `routing` mode, decomposition and parallelism flags, call cap and per-step retry cap;
+  credentials are referenced by environment-variable _name_ and a secret-shaped value is refused;
+  `frontier.enabled` defaults to `false`, so an unconfigured project routes nowhere.
+
+**Architectural invariants.** Each of these is enforced by code and asserted by tests, not merely
+intended:
+
+- The registry is metadata, never an authority: it answers "who could do this?" and never "who may?"
+  (policy) or "who should?" (the decision layer).
+- Every model call goes through the `FrontierExecutor` port, and the executor cannot be constructed with a
+  raw transport — provider adapters arrive already bound to the egress guard, so the frontier cannot
+  become the one path that skips provider host policy.
+- Capability filtering precedes selection, and no stage can invent a capability: configuration, plans and
+  sub-tasks are all re-validated against the closed vocabularies.
+- Provider and model identity stay observable, and the identity that counts is the one that was requested.
+- An unsupported request fails explicitly. A model the registry does not know, a model attributed to the
+  wrong provider, a provider that does not serve it, and a requirement nothing satisfies are deterministic
+  refusals — never a silent substitution, because a substitution would make the trace lie about which
+  model ran.
+- Deterministic platform policy stays outside the model: no answer this layer produces can grant a
+  capability, approve an operation, widen a scope or bypass a budget.
+- With the decision layer `disabled`, every question falls back to code and the platform keeps working;
+  the frontier is equally usable with one model registered.
+
+**Deliberately not implemented.**
+
+- **No semantic retrieval, embeddings or vector search.** The `relevance` domain works only over supplied
+  candidates. A model whose declared role is `retrieval` is registered knowledge and _cannot_ be named or
+  executed by Frontier at all.
+- **No measured quality or latency feedback.** Routing orders by _declared_ metadata — `quality` means
+  declared priority, not an observed benchmark, and an unpriced model is unknown rather than cheap.
+- **No replay or checkpoint execution.** `CheckpointCreated` records position and reason; nothing resumes
+  from it.
+- **No global or cross-workspace registry**, and no persistence of observed health.
+- **No additional large language vendors beyond configuration**, no container or remote execution
+  boundary, no autonomous loop beyond the declared plan, and no per-token streaming to callers (a streamed
+  answer is assembled before it is returned).
+- **No decision cache and no reproducible replay of a provider's decision.**
+- **The agent runtime is still simulated.** This layer decides which model runs and records what it said;
+  it does not perform engineering work.
+
+_Reconciled 2026-09-27: still true of the default runner, which remains simulated, but the runtime can now
+be configured with a bounded real coding path that performs engineering work only through the enforcement
+boundary (ADR-059) and can supply criterion-bound acceptance evidence (ADR-060)._
+
+**Consequences.** Multi-vendor routing arrives without coupling the domain to a vendor: adding a provider
+is configuration plus a host allowlist entry plus a model profile, and the frontier and orchestrator do
+not change. Ordering stays explainable — a surprising choice is either a scoring bug or a decision bug,
+never an invisible one — and cost, usage and failure stay attributable to a model. It also makes the
+platform usable with no decision layer at all. The costs are honest ones: the ordering is only as good as the
+declared metadata, so `quality` mode encodes an operator's belief rather than a measurement; the cost
+key is a fixed reference usage rather than a prediction; observed health lives only for the length of a
+process, so a degraded model recovers by being tried again rather than by being remembered as recovered;
+and every gated or misdeclared profile is a routing fact an operator must now maintain.
+
+**Alternatives rejected.** One model id per project (the limit this ADR replaces: no way to express a
+capability split or a second vendor); letting the decision layer compute eligibility (a network round trip
+for set membership, and selection leaking into the layer that executes); letting a gateway's normalised
+model name become the identity (a priced call reported as unpriced for ever); accepting a reported name as
+provenance only (the trace would then disagree with the rate table); ordering by a fabricated score or
+treating an unpriced model as free (ADR-035); substituting a similar model when resolution fails (the
+trace would lie about which model ran); retrying a `malformed-response` or an `auth` failure (asking the
+same question twice is not a plan); and a second provider-wide streaming implementation instead of a
+transport choice inside one adapter.
+
+---
+
+## ADR-059 — A bounded real coding path through the enforcement boundary
+
+**Status.** This ADR records a capability that **already exists and has been proven end-to-end**. It is
+written after the fact, the same way ADR-058 was: ADR-030 required `ai doctor` to report the agent runtime
+as simulated, ADR-045 established that every operation goes through one enforcement boundary but no agent
+path ever requested a mutation, and the honesty statement in this file names the agent runtime as still
+simulated. None of ADR-045–058 covers the change. Nothing here authorises building anything; the slice is
+built and demonstrated, and this is the record of what it decided.
+
+**Context.** Until this change the runtime was, from the agent's point of view, read-only and simulated,
+and the enforcement stack — capability, policy, path boundary, sandbox, approval, session recording —
+already existed and was itself proven. What did not exist was any path from a model's proposed content to
+an actual, policy-checked mutation. The risk of adding one is that the parse step becomes a second, weaker
+enforcement layer, or that a model's proposal reaches the filesystem or a process without passing the
+gateway.
+
+**Decision.** A model's output becomes a bounded change set that only the existing enforcement boundary
+may act on. Ownership is split four ways, and no layer may do another's job:
+
+```text
+Frontier (LLM):
+  task understanding
+  implementation reasoning
+  implementation content        (the proposed file bodies; nothing else)
+
+Deterministic application layer:
+  parse the change set          (change-set.ts)
+  structural validation         (shape, refs, size bounds)
+  bounded operation construction (FsWriteRequest[] / ProcessExecRequest)
+
+JEV (decision layer):
+  routing
+  risk
+  retry
+  tool choice
+  approval / escalation
+  completion assessment
+
+OperationGateway / policy / sandbox:
+  capability
+  authorization
+  boundary enforcement
+  execution
+  audit
+```
+
+- **The parser decides shape, never permission** (`adapters/agent/change-set.ts`). `parseChangeSet`
+  extracts one JSON value, checks it is an array of `{ref, content}`, checks each `ref` is a
+  workspace-relative reference through the same `assertWorkspaceRef` the boundary uses, refuses
+  duplicates, and enforces per-file, total and file-count bounds. It performs **no** permission check: a
+  well-formed ref may still be outside the writable roots, secret-shaped or runtime state, and only the
+  gateway decides those. It is total — a malformed proposal is a refusal value, never a thrown error.
+- **The runner holds no authority** (`adapters/agent/change-set-agent-runner.ts`).
+  `createChangeSetAgentRunner` performs exactly one model turn, parses, and requests each write as an
+  `fs.write` operation through the injected `OperationGateway`, then requests the configured verification
+  command as a `process.exec` operation through the same gateway. It holds no `fs`, no `child_process`, no
+  `fetch` and no environment. With no gateway it performs **no** operation at all — ADR-045's fail-closed
+  reading of a missing boundary.
+- **Writes and execution are separate capabilities.** A write maps to `filesystem.write`; the command maps
+  to `process.execute`. Each is evaluated independently, so authorising one never authorises the other.
+- **Verification is a real process, and failure is truthful.** A process that runs and exits non-zero is
+  recorded as a **failed** verification `test` step (`passed: 0, failed: 1`), not as a failed tool; a
+  malformed change set is likewise recorded as a failed `change-set` verification step. Neither can become
+  successful verification.
+- **The application owns the verdicts.** `runTask` folds every reported step into the existing gates —
+  per-step policy evaluation, budget, approval, session recording (`recordToolCall`, `recordTestRun`),
+  completion assessment and escalation. The runner decides none of them.
+
+**Safety invariants.** Each is enforced by code and asserted by tests, not merely intended:
+
+- Every mutation goes through the `OperationGateway`; there is no second write path, and the boundary is
+  not exposed to the runner.
+- The parser performs structural validation only, never authorization; the gateway performs authorization
+  only, never parsing. The two are complementary and both must run.
+- Write and execute are separate capabilities, each declared in the attempt's envelope and evaluated
+  against the same policy.
+- Writable roots remain bounded (`policy.filesystem.writableRoots`), and the workspace root is an
+  unconditional fence.
+- Process execution is argv-only with no shell; the child receives only policy-allowlisted environment
+  variables.
+- Command allowlisting is enforced in both the policy layer and the sandbox boundary.
+- `.git`/`.ai` (runtime state) and secret-shaped paths are refused for a write regardless of capability,
+  approval or configuration.
+- Write-size bounds exist at two levels — the parser's per-file, total and file-count limits, and the
+  boundary's `maxWriteBytes` (`WRITE_TOO_LARGE`) — checked before anything is written, so an over-cap
+  proposal cannot produce a partial file.
+- Malformed, traversal, oversized and duplicate proposals fail closed _before_ any operation is requested.
+- A non-zero verification result is a failed verification and cannot be recorded as a pass.
+- Human approval remains authoritative: an effective risk of `high` on `execute` requires a human grant,
+  and a grant authorises one attempt only (ADR-037, ADR-049).
+
+**Deliberate limitations.** Not implemented, and not claimed:
+
+- **One-shot runner, not an agent loop:** exactly one model turn per attempt, with no iterative repair.
+- **No automatic repair loop and no retry of a failed verification:** a failing command ends the attempt.
+- **No rollback or atomic multi-file transaction:** writes are performed in order and stop at the first
+  refusal, so a refusal part-way through a change set can leave earlier files written.
+- **A fixed, configured verification command:** the runner runs the command the project configured, not a
+  command chosen from the model's proposal.
+- **`orchestrate` does not apply changes:** the frontier/orchestrator path selects and calls a model but
+  performs no mutation.
+- **Completion stays conservative, and is evidence-based only where it can be:** a passing focused test
+  is never treated as task completion on its own, because a check passing is not a criterion being met.
+  Since ADR-060 a criterion the task author explicitly _bound_ to a suite or a named check is assessed
+  from that evidence, which can inform completion; a criterion with no binding stays `pending` for a
+  human. The task still ends in `review` (ADR-028, ADR-054).
+
+**Consequences.** A model's proposal gains a real, policy-checked path to the workspace without adding a
+new enforcement layer: the parse step feeds the boundary that already existed, and every property
+ADR-045/047/048 established still holds. The `ai doctor` simulated-runner warning and the "still
+simulated" honesty statement in this file were accurate only for a project left on the default runner;
+that reconciliation has since happened. `ai doctor` now reports a `change-set` runner as a bounded real
+coding path rather than a warning, and ADR-060 records the criterion-level acceptance evidence its
+verification can produce. The costs are the deliberate limitations above: no repair loop, no
+transactions, and a completion verdict that stays conservative because a passing check is still not a
+task criterion being met.
+
+**Alternatives rejected.** Letting the parser enforce permission (a second, weaker boundary that would
+drift from the real one, which is exactly what ADR-045 forbids); letting the runner hold a filesystem
+handle or a spawner (the enforcement stack would become advisory); treating "a focused test passed" as
+task completion (the runtime would then be deciding completion, and a passing unit test is not evidence
+that the task's acceptance criteria are satisfied); making the verification command a free-form request
+from the model (execution would be chosen by the content being verified); and reusing the simulated
+runner's step shape without a real parse (the change would have been simulation under a new label).
+
+---
+
+## ADR-060 — Acceptance evidence is bound explicitly to a suite or a named check; nothing is inferred
+
+**Status.** This ADR records a capability that **already exists and is proven end-to-end** (`tests/unit/acceptance-evidence.test.ts`, `tests/unit/change-set-runner.test.ts`). Like ADR-058 and
+ADR-059 it is written after the fact; nothing here authorises building anything.
+
+**Context.** A passing verification command is not evidence that a task's acceptance criteria are
+satisfied. ADR-028, ADR-054 and ADR-059 deliberately left completion `uncertain` for exactly this
+reason: the runtime reported whole-suite counts, treated "the focused test passed" as no evidence of
+completion, and left a human to close the task. The obvious shortcut — let the runtime infer "the
+suite passed, so the criteria are met" — would make the runner grade its own homework, and whole-suite
+counts are too coarse anyway: one criterion is often decided by one focused test inside a suite that
+also runs unrelated tests. The missing piece was not more evidence but a way for the _task author_ to
+say which evidence decides which criterion, so an assessment could be criterion-specific without the
+runtime inventing the connection.
+
+**Decision.** A criterion may be bound, at task-authoring time, to the verification evidence that
+decides it, and binding is the _only_ way a criterion is ever assessed without a human.
+
+- **The binding is an explicit claim by the author** (`src/tasks/task.ts`).
+  `TaskAcceptanceCriterion.verifiedBy?: { suite, check? }` names a verification suite — the stable
+  suite name on a `TestCompleted` event — and, optionally, one _named_ check inside it. A binding must
+  name a suite: an empty suite would create a criterion that looks machine-assessable but can never be
+  assessed, which is worse than an explicit `pending`. The CLI writes it with
+  `task create --acceptance-verified-by <criterion-id>=<suite>[#<check>]` (`src/cli/commands/task.ts`).
+- **Nothing infers a binding.** A criterion with no `verifiedBy` is never machine-assessed; it stays
+  `pending` until a human or an explicit step asserts it. A passing test that the criterion did not name
+  is not evidence for that criterion.
+- **The join is deliberately narrow.** An execution event is acceptance evidence for a criterion only
+  when that criterion named the suite — and, when it named one, the check — the event belongs to. A
+  named check's identity comes from the operator's own `agent.verification.checks[].id`, authored in
+  configuration and never derived from command output, exit code, position or timing. Two checks cannot
+  share an id, because an ambiguous id would let a result be mis-attributed to the wrong criterion.
+- **The check is assessed alone.** When the binding names a `check`, only that check's own outcome is
+  used: an unrelated failure elsewhere in the same suite neither satisfies nor invalidates the
+  criterion. A binding that names only a suite keeps the suite's whole-suite verdict — the behaviour
+  that predates named checks.
+- **Assessment is deterministic and recorded, never taken on trust**
+  (`assessAcceptanceCriteria`, `assessAcceptance`). Only `pending`, bound criteria are candidates; a
+  status a human already set (`met`, `not-met`, `waived`) is never overwritten by a later run. A
+  failure outranks a pass (any failing check ⇒ `not-met`, otherwise at least one passing check ⇒ `met`).
+  No result is no evidence: a bound suite or check that never ran, or a result with zero checks, leaves
+  the criterion `pending`. The assessment is emitted as `AcceptanceAssessed`, whose `criteria` entries
+  are `<criterion-id>:<met|not-met>:<suite>`, or `<…>:<suite>:<check>` when the criterion was bound to a
+  named check. Combined with the matching `TestCompleted` event (which carries the check counts), this
+  is the provenance that makes a criterion status reproducible from the log alone.
+- **A named check adds no authority.** Each declared check runs as an ordinary `process.exec` operation
+  through the same `OperationGateway`, with the same policy, capability and sandbox checks as the
+  whole-suite command (ADR-045, ADR-059). Declaring checks changes what is _observed_, never what is
+  _permitted_.
+- **A failing check does not erase another check's evidence.** Every declared check runs even when an
+  earlier one failed, so one unrelated failure cannot destroy the evidence a later criterion needs. Only
+  a boundary refusal stops the attempt.
+
+**Provenance.** Which criterion borrowed which result is answerable without reading prose. The task
+projection carries `verifiedBy` (declared by the author) and `evidence` (the suite, check, outcome and
+counts that produced an automatic status), and the log carries `AcceptanceAssessed` plus the underlying
+`TestCompleted`. A reader who has only the log can reconstruct every automatic status; nothing is stored
+as content or prose.
+
+**Backward compatibility.** Every part of this is additive, and the pre-existing behaviour is preserved
+exactly:
+
+- A bare-string criterion is unchanged: it has no `verifiedBy`, is never machine-assessed, and the
+  `acceptanceCriteria` input still accepts plain strings alongside the structured form.
+- A criterion bound to a suite _only_ keeps the whole-suite verdict — the same result the platform
+  produced before named checks existed.
+- `agent.verification.command` is now optional because a project may declare only `checks`; a
+  configuration that has only a command (or neither) keeps working, and a command-only project simply
+  records whole-suite evidence and no check ids.
+- `TestCompleted.check` and `VerificationSuiteEvidence.check` are optional; absent means a whole-suite
+  result, which is the pre-existing meaning.
+- The new fields (`verifiedBy`, `evidence`) and the `AcceptanceAssessed` event are optional and additive
+  in the domain, the event payload map, the trace projection and the file repository; no persisted shape
+  loses a field, and no existing test expectation changes.
+
+**Consequences.** A criterion can now be established by real verification instead of only by a human,
+but only where the task author explicitly said which evidence decides it, and only from that evidence.
+Completion stays conservative: `measuredAcceptanceCriteriaMet` returns a count only once at least one
+criterion has actually been assessed, and `undefined` while every criterion is unmeasured, so "not
+measured" and "zero met" remain different facts (ADR-054). A passing focused check that no criterion
+named still cannot become task completion.
+
+**Alternatives rejected.** Inferring a criterion from any passing suite (the runner would decide
+satisfaction from its own run, which is the homework-grading failure ADR-028 forbids); matching a
+criterion to a command by its string or position (unstable, and a silent mis-attribution); deriving check
+identity from output or timing (an identity that changes between runs cannot be a stable join key);
+letting a suite failure anywhere invalidate a check-bound criterion (over-broad — it makes a criterion's
+fate depend on unrelated tests); making `verifiedBy` required (it would forbid criteria that only a human
+can judge); and defaulting a criterion to `met` when evidence is missing (fabricating a measurement).
+
+---
+
+## ADR-061 — Completion is asked about a classified evidence shape, and its reason codes are bounded by it
+
+**Context.** Completion is the one assessment whose answer _withholds_ a human (ADR-054), so its
+semantics have to be exact. The runtime already held four numbers (`acceptanceCriteriaTotal`, an
+optional `acceptanceCriteriaMet`, `verificationChecks`, `verificationFailures`), but the _question_ put
+to the decision layer carried only two facts: `criteria:<met|unmeasured>/<total>` and
+`verification-checks:<n>`. Four materially different situations therefore reached a reader as the same
+string — everything established, some things established, nothing established, and nothing declared —
+and `verification-failures` was not stated at all, so "nothing failed" could only be inferred from the
+gate that happened to skip the question. The domain's six reason codes stood on unequal footing too:
+`verification-failed` and `no-verification-evidence` were answered by code and tested;
+`criteria-met` and `verification-passed` existed only as expected provider answers; and
+`evidence-insufficient` and `criteria-unclear` had **no producer, no consumer and no test** — a
+vocabulary that documented an intention rather than a contract. Nothing connected any reason code to the
+evidence, so a layer could assert `criteria-met` while the platform reported `criteria:unmeasured/2` and
+the claim was recorded as given.
+
+**Decision.** The completion question is about a classified evidence shape; the shape is stated as a
+fact, and it bounds which reason codes the question offers.
+
+- **Six shapes, classified in a fixed precedence** (`COMPLETION_EVIDENCE_SHAPES`,
+  `classifyCompletionEvidence`). In order: `failed` (any failing verification), `none` (no verification
+  result at all), `no-criteria` (nothing declared, and therefore nothing established —
+  `met === total` holds trivially at zero and must not read as a satisfied contract), `unmeasured`
+  (criteria declared, none assessed), `partial` (some established, some not), `fully-satisfied`. Every
+  shape is a fact about what was _measured_, never a verdict about the work: `partial` does not say a
+  criterion failed.
+- **Facts, not prose.** `criteria:` keeps its exact pre-existing form including the `unmeasured`
+  sentinel; `criteria-pending:`, `verification-checks:`, `verification-failures:` and
+  `evidence:<shape>` are additive. `criteria-pending` is counted from the record when the caller
+  supplies it (`acceptanceSummary` through `runTask`), never derived from `total - met`; where it is not
+  supplied the platform states its own accounting rather than leaving the fact out.
+- **The offered reason codes are the semantic contract.** `criteria-met` is offered only for
+  `fully-satisfied`; `criteria-unclear` only where something is not established; `verification-passed`
+  wherever verification ran and nothing failed; `evidence-insufficient` always, so a layer is never
+  forced into a claim the evidence cannot support. Membership _is_ the enforcement: a code outside the
+  offered set is rejected by the existing validator and the deterministic fallback answers
+  (`validate.ts`, ADR-053 — reject, never repair), so an unsupported claim cannot reach the record. The
+  **option** stays unconstrained: a layer may still answer `complete` / `incomplete` / `uncertain` on
+  any shape it is asked about, with or without a reason code.
+- **The deterministic gates and their precedence are unchanged.** A verification failure
+  (`incomplete` / `verification-failed`) outranks the absence of verification
+  (`uncertain` / `no-verification-evidence`), and both are answered by code before any provider is
+  reached — a layer cannot contradict either. Both gated shapes still offer their own reason code,
+  because a deterministic answer must name a code its own question offered.
+- **Partially measured evidence stays a judgement.** The platform does not reinterpret an unmeasured
+  criterion as a failure, and does not answer the question for the layer. `acceptanceCriteriaMet`
+  remains absent when nothing was assessed, so "not measured", "zero met" and "all met" stay three
+  different facts (ADR-035, ADR-054).
+- **Nothing gained authority.** The assessment is still advisory; the confidence gate is unchanged (only
+  `complete` is gated, below threshold becomes `uncertain`, an absent confidence is not gated); no
+  criterion status is produced and none is inferred; no task status is written; and the decision budget,
+  its closing reserve and the log-counted consultation cap are untouched (ADR-055, ADR-056).
+
+**Consequences.** A decision layer can tell the six cases apart without parsing a string, `0` is never
+inferred from an absent fact, every completion reason code now has a producer, a bound and a test, and an
+unsupported claim costs a recorded fallback rather than a record that reads as though the platform had
+measured something it never measured. The cost is deliberate: a layer whose option is right but whose
+reason code over-claims loses the whole answer to the conservative fallback — `uncertain`, and therefore
+a human — because the alternative is keeping a claim the evidence does not support, and the rejection is
+visible in the trace as `invalid-answer`. A second cost is that partially measured tasks remain a
+judgement: a project that wants every criterion established before completion still needs a human to
+close the task (ADR-028). The authored evaluation corpora keep their own labels; the completion matrix's
+"ties stay unlabeled" convention and the hand-written `criteria:1/3` row therefore still differ about
+partially measured evidence, and that divergence is left for the next label revision rather than being
+silently rewritten here.
+
+**Alternatives rejected.** Encoding the distinction in the question's prose (unversioned, untestable,
+and the reason this ADR exists); leaving two reason codes with no producer, no bound and no test (a
+vocabulary that documents an intention is not a contract); rejecting an answer whose _option_ looks
+optimistic while its reason code is supported (the option is the judgement the layer is being asked
+for); repairing an unsupported code into a supported one (a repaired answer is one the platform authored
+and then attributed to the layer — ADR-053); treating a pending criterion as `not-met` (it would make an
+unbound criterion a failure, the exact inference ADR-060 forbids); and answering the fully established
+case deterministically as `complete` (it would move a judgement the platform deliberately leaves tothe layer and to a human into code, and would make the confidence gate unreachable in the one case it exists
+for).
+
+---
+
+## ADR-062 — A human acceptance verdict is an explicit, named, recorded act
+
+**Context.** ADR-060 made acceptance evidence explicit — a criterion is assessed only from a suite or a
+named check the task author bound it to — and stated the platform's other authority in one line: a status
+a human set is never overwritten by a later run (`docs/TASK_CONTRACT.md` §8.1, "A human's status is final").
+That authority had no production path. `markAcceptanceCriterion` existed in the domain with **no caller
+outside tests**, so `waived` was unreachable in production, a criterion no verification could decide could
+never leave `pending`, and the only remaining human act — closing the task — recorded nothing about which
+criteria a person had accepted (ADR-028, ADR-054). The judgement was real, documented and unwritable: a
+project could bind a criterion to a check, or leave it pending forever, and nothing in between.
+
+**Decision.** Establishing a criterion as a person is an explicit, named, recorded act, and it is the only
+other way a criterion stops being `pending`.
+
+- **One command, three verdicts.** `ai task verdict <task-id> --criterion <AC-n> --status
+<met|not-met|waived> --by <name>` (`src/cli/commands/task.ts`) calls
+  `TaskService.recordAcceptanceVerdict` (`src/application/task-service.ts`). `pending` is not a verdict:
+  it is the state a task starts in rather than something a person asserts, so the platform has no
+  operation that returns a criterion to it.
+- **Named, never anonymous.** `--by` is required for the same reason `--approver` is (ADR-037), and the
+  event's actor is `{ type: "human", id: <name> }`. An assertion with nobody behind it is exactly the
+  record this exists to prevent.
+- **The event is authoritative; the projection is derived.** `AcceptanceVerdictRecorded { criterionId,
+from, to, verdictBy }` is emitted **before** the criterion is written (ADR-006, ADR-023), so a
+  criterion's history is replayable — `met → not-met → waived` is three recorded transitions, not a final
+  state a reader has to trust.
+- **Provenance is explicit, and a status has exactly one source.** A criterion carries `verdictBy` (a
+  person decided) or `evidence` (a verification decided), never both — enforced by `validateTask` — and
+  keeps `verifiedBy`, the author's declaration of which evidence was _supposed_ to decide it. A verdict
+  **replaces** the machine's `evidence` references rather than accumulating beside them: a `met` criterion
+  whose provenance still said a check failed would be a record that argues with itself.
+- **A human may overrule a machine, and may change their own mind.** "A human's status is final" is final
+  _against the machine_: machine assessment only ever touches a `pending` criterion (ADR-060). A later
+  explicit verdict replaces an earlier one, and each is recorded, which is what makes rework honest — a
+  task may return to `in_progress` (ADR-028's `review → in_progress`), the verification may pass, and the
+  person who owns the outcome may correct a criterion a machine rejected for a reason that no longer
+  holds. The correction is visible as a transition rather than silent.
+- **A terminal task refuses any verdict.** `completed`, `failed` and `cancelled` freeze their criteria, so
+  "the criteria of a closed task cannot move" holds by construction rather than by convention.
+- **A verdict moves no lifecycle state.** It writes one criterion field and one event. No decision, no
+  session, no budget and no approval is involved; `--dry-run` plans the same mutation through the same
+  domain function and writes nothing.
+- **A decision layer cannot establish a criterion.** `verdictBy` is written only by
+  `recordAcceptanceVerdict`, which the CLI command is the only caller of. JEV receives aggregates and its
+  completion answer stays advisory and non-authoritative (ADR-054, ADR-061).
+
+**Consequences.** The acceptance model now has both of its authorities in production — verification the
+author bound, and a person — so `waived` is reachable, a criterion no check can decide is no longer stuck,
+and `acceptanceSummary().allMet` describes something a project can actually reach. "Why is this criterion
+met?" is answered without prose: the projection shows `(by <name>)` or `(verified: <suite>[#<check>])`
+(`src/cli/render.ts`), and the log holds the event and the `TestCompleted` result behind it. The costs are
+that the platform now has a human write path to the task projection — deliberately narrow, one field and
+one event — and that a criterion a person decided reads to the completion question exactly like one a
+suite decided, because that question receives aggregates by design (ADR-061). Provenance of _how_ criteria
+were established is available to a human and to an auditor, not to JEV, which is the intended boundary.
+
+**Alternatives rejected.** Inferring human acceptance from closing the task (it records nothing about which
+criteria were accepted, and a bare criterion would go on looking unmeasured); making the verdict a decision
+question (a decision layer would then be able to establish a criterion, which ADR-054 and ADR-061 forbid);
+a `pending` verdict (an "un-assert" operation whose audit meaning is unclear — the honest equivalent is
+another verdict, and the history shows both); letting machine evidence and a verdict coexist on one
+criterion (a status with two explanations is a status nobody can read); refusing a person a second verdict
+(it would freeze a criterion against the person who owns the outcome and leave a reworked task permanently
+short of its criteria); and leaving `verdictBy` out of the projection on the grounds that the log already
+has it (the operator reading `ai task status` would have to open a JSONL file to tell a waiver from a
+passing check, which is the gap ADR-060's own provenance section named).
+
+---
+
+## ADR-063 — The acceptance record is replayed against the events that wrote it
+
+**Status.** This ADR records a check that **already exists and is proven end-to-end**
+(`tests/unit/acceptance-replay.test.ts`, `tests/unit/doctor.test.ts`).
+
+**Context.** ADR-060 and ADR-062 made a criterion's state event-derived: `AcceptanceAssessed` from
+verification the task author bound the criterion to, `AcceptanceVerdictRecorded` from a person, the
+criterion is a projection of the two (ADR-006), and every writer is event-first. Nothing checked that
+the projection still agreed with that history. `ai doctor` reconstructed one task's **trace** and judged
+its internal consistency, but the acceptance fields of a task record were never compared against the
+events that were supposed to have produced them — so a write that landed without its event, a
+hand-edited record, or a bug in either path was invisible until a human read the JSONL by hand. The
+authority added in ADR-062 made that gap worse rather than better: the platform now has a human write
+path to the projection, and a record nobody can rebuild is exactly what an unnecessary write path
+leaves behind.
+
+**Decision.** The acceptance record is **replayable from its own log, and checked**: `ai doctor` gains
+the offline `acceptance-replay` probe, and `replayAcceptance` (`src/application/acceptance-replay.ts`)
+is the single fold it uses.
+
+- **Two events, and nothing else.** Only `AcceptanceAssessed` and `AcceptanceVerdictRecorded`
+  establish a criterion. `TestCompleted` and every other execution event establish nothing on their own,
+  so an execution event without the binding contract is not evidence and is not replayed as any.
+- **The domain's own rules, not a second interpretation.** An assessment establishes a `pending`,
+  bound criterion as `met` or `not-met` and records the evidence **identity** it read; a verdict
+  establishes `met`, `not-met` or `waived`, replaces whatever the machine recorded, keeps the author's
+  `verifiedBy` binding and leaves no machine `evidence`; a criterion a person established is never
+  re-assessed. A later assessment of an established criterion is reported **and ignored**, because
+  ignoring it is what the domain does.
+- **The record is compared, never repaired.** Status, source (`verdictBy`), evidence identity and the
+  evidence's own consistency with its status are each compared per criterion, in criterion order; a
+  disagreement is a `fail` naming the criterion and both values. The check writes nothing, appends
+  nothing, and never adjusts the record to match the log — a repaired record is one nobody can audit.
+- **The criteria themselves are the contract, not a projection.** `TaskCreated` carries the title, risk
+  and workspace, so the criteria list — id, statement, and the author's binding — is taken from the
+  record and only a criterion's **state** is replayed. That is stated rather than implied, because a
+  reader could otherwise assume the whole record is log-derived.
+- **The log's own arithmetic is checked too.** `AcceptanceAssessed` reports `assessed`, `met` and
+  `notMet` about its own reference list; each must equal what that list says, and a reference that is
+  malformed, names an undeclared criterion, or names a status an assessment cannot establish
+  (`pending` is not a verdict; `waived` is a person's act) is reported deterministically.
+- **The honest limit is named.** An assessment records _which_ evidence decided a criterion
+  (`<criterion-id>:<status>:<suite>[:<check>]`), not what that evidence measured, so the record's
+  `passed:<n>` / `failed:<n>` **values** cannot be re-derived from it. They are checked for shape and
+  for consistency with the status (an assessed criterion read at least one check; nothing failed for it
+  to be `met`; something failed for it to be `not-met`), and the doctor output says so rather than
+  implying the counts were verified.
+
+**Consequences.** "The record is what the log says" is now mechanically checkable per criterion, and
+divergence — a lost event, a torn write, a hand-edit — surfaces in `ai doctor` as a failure naming the
+criterion instead of waiting for someone to read the log. The cost is one more thing `ai doctor` does
+per project, and one asymmetry that is recorded here rather than hidden: a projection is checked
+against the log, while a task known only to the log is the trace check's business, not this one's.
+
+**Alternatives rejected.** Repairing the record from the log (it would make the check a second writer
+and would destroy the evidence of the divergence); treating the check as an advisory warning (a record
+that cannot be rebuilt from its own history is corruption, not a note); reconstructing the criteria
+from the log (they are not in it, and inventing a location for them is a larger change than the
+capability being checked); folding `TestCompleted` to re-derive the evidence counts (the assessment's
+own evidence vector is per run, and a second run's results would be folded into the first one's
+assessment, so the counts would be wrong exactly where a task has been reworked); and restating the
+counts in `AcceptanceAssessed` — the smallest additive, backward-compatible change that would make the
+count **values** checkable, and deliberately not part of this decision, because it would change an
+event written by earlier versions to verify a detail the log already records as a reference. It is
+recorded here as the next step if count tampering ever matters.
+
+---
+
+## ADR-064 — Skill payload integrity is verified against a repository-owned canonical pin
+
+**Status.** Introduced with the check it describes. Proven end-to-end by `tests/unit/skills-lock.test.ts` and
+`tests/integration/skills-lock.test.ts`, the latter running the real check against this repository, the real
+git index and the real recorded hashes.
+
+**Context.** Installed agent skills are upstream repositories materialised into `.agents/skills/<name>/` by
+the third-party `skills` CLI. This repository commits the **lock** and not the payload: `skills-lock.json`
+records a source, a source path and a content hash; `.gitignore` hands the installed payload path to the
+installer and ignores the `.claude/` adapter symlink; ADR-044 already forbids committing local agent-tooling
+state. Every one of those rules lived in a comment, and nothing read the comments.
+
+Three failures were therefore invisible from inside the repository. A payload could be edited — by a
+formatter, a merge, or an agent — and the pin would be a claim nobody compared against. A payload that was
+never installed looked exactly like one that matched. And because git neither untracks a file that a new
+ignore rule covers nor refuses to commit one that already exists, a payload added with `git add -f` would be
+committed while the comment beside the rule still said it never could be.
+
+**The finding that shaped the decision: a `skills-lock.json` v1 `computedHash` is not a portable content
+pin.** The installer's `computeSkillFolderHash` hashes a working tree it has just materialised, line endings
+included, and those bytes come from whichever host ran `skills add` — CRLF on a host with `core.autocrlf`,
+LF on one without, for the same upstream revision. Neither `skills@1.5.26` nor `skills@1.7.0` exposes any
+line-ending or `autocrlf` option anywhere, so there is no canonical value to ask for. Reproduced on this
+checkout, the two locked skills sit on opposite sides of that line. `hindsight-docs`'s payload is untracked
+and holds the CRLF the installer wrote, so its recorded pin `0accfc1b…` reproduces from its raw bytes
+exactly. `typesafe-ai`'s payload is tracked and therefore stored LF under `* text=auto eol=lf`, so its
+recorded pin `a6ed7d8a…` **is the CRLF rendering** and cannot be reproduced from a checkout on any platform.
+That was confirmed rather than inferred: LF-canonicalising two independent CRLF copies of the same revision
+on this machine yields `9cd84c5e…`, the hash of the LF copy this repository holds, while a different revision
+of the same skill canonicalises to a different value — so the canonical form is a faithful identity, not a
+lossy one. The format does contain a portable identity, `skillFolderHash` — the 40-hex git tree SHA of the
+upstream folder, which the installer's own update path prefers and falls back from `computedHash` to reach —
+but it pins the **upstream** folder rather than the payload in this checkout, belongs to the global-install
+flavour of the lock, and is derived from the GitHub tree API or a clone. Under a guarantee that must hold
+offline, over a payload this repository owns, it is the wrong identity.
+
+**Decision.** The two contracts are separated rather than reconciled. `skills-lock.json` keeps exactly the
+meaning the installer gives it and is never rewritten; `skills-lock.pins.json` is this repository's own
+record, and `checkSkillsLock` (`src/skills/skills-lock.ts`) decides on it — read-only, inside the existing
+`pnpm test` step.
+
+- **The external record is reproduced and reported, never enforced.** `computeSkillPayloadHash` copies
+  `computeSkillFolderHash` exactly: a recursive walk skipping `.git` and `node_modules`, POSIX-relative paths
+  sorted with `localeCompare`, and a SHA-256 over each path and then each file's raw bytes as two separate
+  updates. Each payload's relationship to `computedHash` is reported as a note naming which rendering the
+  installer recorded, so "the lock was written on another host" is distinguishable from "the lock is stale"
+  instead of having to be guessed at. It never decides a status, in either direction: a stale external hash
+  cannot fail an unedited payload, and it cannot launder an edited one either.
+- **The repository's record is content, canonicalised by one declared rule.** `skills-lock.pins.json` states
+  its own terms (`algorithm: sha256`, `lineEndings: lf`), and the checker refuses any form it does not
+  implement rather than approximating it. The canonical form is `CRLF` → `LF` and nothing else: a lone `CR`
+  is not a line ending and is left alone, so a payload that legitimately contains carriage returns is not
+  rewritten into different content. That is the policy `.gitattributes` already declares for every file this
+  repository owns, and it is what lets one pin cover a Windows install, a Linux install and a committed
+  checkout alike.
+- **A separate file, not an extra field.** The installer rewrites the lock wholesale on every `skills add`,
+  and its writer carrying unknown fields through today is undocumented behaviour to rest a repository
+  guarantee on. A second file makes the boundary visible instead of implicit: everything in
+  `skills-lock.json` is the installer's, everything in `skills-lock.pins.json` is this repository's.
+- **One hash decides, and everything else still fails.** A changed byte, a renamed or moved file, an added
+  file, a removed file, and any change to the set of files all fail on the canonical pin. What is deliberately
+  not flagged is a pure line-ending rewrite, because under this repository's declared policy that is not a
+  content change. A lock entry with no pin, a pin with no lock entry, a lock entry that no longer parses, and
+  a pins file stating terms this code does not implement are each reported as their own finding, once,
+  naming the skill, the payload path and both hashes — never as "approximately equal".
+- **Whether absence is a failure follows from `.gitignore`.** A lock entry's payload is
+  `.agents/skills/<name>`. Where the ignore rules declare that path ignored, the payload is a local install
+  and a fresh clone legitimately has none: absent is reported as `not-installed` and is not a failure. Where
+  they do not, the payload is repository content that git owns, and absence is a failure. The check reads the
+  repository's own statement of intent instead of keeping a second list of paths that could fall out of step
+  with the first.
+- **The same derivation guards the other half.** Every directory `.gitignore` declares ignored must contain
+  **nothing tracked**. That catches a force-added payload without naming a single path: `.claude/` and the
+  vendored payload are both covered by the one rule, and a payload directory the lock does not name is
+  reported as undeclared.
+- **The check is read-only.** It never writes either record, never repairs a payload, never installs
+  anything, and requires no network access.
+
+**Consequences.** This repository's guarantee is now explicit, portable and falsifiable: an edited, deleted,
+moved or force-added payload fails a test that names the skill, its payload path, the pin and what it found —
+and the same single pin holds on a Windows install, a Linux install and a checkout. The external lock is
+untouched: no field added, no hash rewritten, so `skills add`, `skills update` and `experimental_install`
+behave exactly as the CLI defines them. A `skills add` that legitimately changes a payload is caught as a
+deliberate event rather than absorbed: the failure prints the new canonical hash, a person confirms that
+revision is the one they meant, and the pins file is updated by hand. Two limits are recorded here rather than
+discovered later. First, a pin records content and not provenance — it cannot prove a payload came from the
+revision the external lock names, only that it is the content this repository agreed to hold. Second, every
+locked skill now needs a pin kept beside it, and forgetting one is a failure rather than a silent pass; that
+is the intended direction, but it is a new step in adding a skill. The cost is one more tracked file, one more
+thing the suite reads on every run, and no new command, dependency or network access.
+
+**Alternatives rejected.** _Re-pinning the external lock's `computedHash` values to the LF rendering_ — it
+would redefine a field the installer owns and writes, so the CLI's own "is this skill already up to date"
+comparison, which hashes the installed directory against exactly this field, would begin disagreeing with a
+lock the CLI itself did not write; trading a portable repository pin for a corrupted external one is not a
+trade worth making. _Recording the pin as an extra field inside `skills-lock.json`_ — the same objection with
+a smaller blast radius, and it still rests on undocumented field preservation. _Adopting `skillFolderHash`
+instead of a repository pin_ — it is the installer's portable identity, but it pins the upstream folder rather
+than the payload this repository holds, means leaving the project-install flavour of the lock for the global
+one, and needs the GitHub tree API or a clone to derive. _Keeping the earlier either-rendering tolerance for
+tracked payloads_ — a compatibility shim whose verdict depended on which renderings its author thought to try,
+and which left installed payloads strictly host-bound; one canonical form for every payload, declared in the
+record itself, is smaller and says what it means. _Normalising more than line endings_ (whitespace, trailing
+newlines, encodings) — "approximately equal" is the failure mode this check exists to prevent, and every such
+rule widens what an edit may do unnoticed. _Regenerating or repairing either record from what is on disk_ — a
+record that follows the payload records nothing, and it would make the check a writer. _Requiring the vendored
+payloads to be absent from disk_ — they are what local agents read; the rule is that they are not
+**committed**, not that they are not installed. _A shell script beside `scripts/check-git-identity.sh`, or a
+new `scripts/verify.sh` step 8_ — that script is deliberately outside `verify.sh` because CI cannot satisfy
+it, whereas this check is precisely what CI should run, and a new step would renumber a pipeline the RFC says
+grows by appending (§32.4) for a check step 5 already carries. _Failing the tracking clause when git is
+unavailable_ — a git-less export of the tree is a legitimate environment, so the check reports that the
+question was unanswerable rather than inventing an answer, while still requiring it to have been answered
+wherever git exists.
+
+---
+
 ## ADR index
 
-| ADR | Title                                                                | Area          |
-| --- | -------------------------------------------------------------------- | ------------- |
-| 001 | V2 is a foundation, not a framework                                  | Scope         |
-| 002 | Cheapest-sufficient-layer ladder for every decision                  | Architecture  |
-| 003 | Decisions are first-class, recorded entities                         | Decisions     |
-| 004 | JEV behind a `DecisionProvider` port, never mandatory                | Decisions     |
-| 005 | Tasks are first-class; execution record lives in events              | Tasks         |
-| 006 | Event log is the single source of observability truth                | Observability |
-| 007 | Money is integer micro-USD                                           | Cost          |
-| 008 | Cached tokens are a subset of input tokens                           | Tokens        |
-| 009 | Budgets are pure, provider-independent, evaluated twice              | Budgets       |
-| 010 | Workspace isolation is a declared capability profile                 | Isolation     |
-| 011 | Policy is pure, most-restrictive-wins, with risk floors              | Security      |
-| 012 | No database in Phase 2; local inspectable persistence later          | Storage       |
-| 013 | Branded ids and injected time; ISO-8601 UTC timestamps               | Core          |
-| 014 | Additive non-destructive migration; no speculative directories       | Migration     |
-| 015 | Human approval is blocking, scoped, non-transferable                 | Human control |
-| 016 | Memory is project-scoped; AI knowledge stays `proposed`              | Memory        |
-| 017 | ADRs are human-decided; AI may draft only                            | Governance    |
-| 018 | Deterministic default context selector; bounded JEV assist           | Context       |
-| 019 | Trace replay exact; decision replay reports differences              | Replay        |
-| 020 | CLI is a thin adapter; zero mandatory runtime dependencies           | Interface     |
-| 021 | Dashboard deferred and removable                                     | Interface     |
-| 022 | Composition root is the only module naming an adapter                | Architecture  |
-| 023 | Event first, projection second                                       | Observability |
-| 024 | Project configuration is JSON, not YAML                              | Configuration |
-| 025 | Project-scoped JSONL log, partitioned per workspace                  | Storage       |
-| 026 | Scope is inherited from context; session implies task                | Traceability  |
-| 027 | A task id is not authorization; scope is explicit                    | Security      |
-| 028 | A run ends in `review`; a human closes the task                      | Human control |
-| 029 | Approval suspends; denial fails                                      | Policy        |
-| 030 | `ai doctor` checks only what it can know, honestly                   | Operations    |
-| 031 | Offline deterministic provider; illustrative rates only              | Providers     |
-| 032 | CLI is a pure dispatcher plus a process shim, no framework           | Interface     |
-| 033 | One real adapter speaks a protocol; credentials are references       | Providers     |
-| 034 | Retry is a bounded decorator over the provider port                  | Providers     |
-| 035 | Failures categorised; absent usage is unavailable, not zero          | Providers     |
-| 036 | Append coordination is a port with a local guarantee                 | Storage       |
-| 037 | A grant is single-use, scoped, and never widens permission           | Human control |
-| 038 | A stale task projection is refused before anything is spent          | Concurrency   |
-| 039 | Deterministic context selection; content is never an event           | Context       |
-| 040 | Explicit context budget; mandatory overflow is loud, no truncation   | Context       |
-| 041 | One ordered exclusion policy; repository text is data                | Security      |
-| 042 | Change detection reports capability and degrades explicitly          | Context       |
-| 043 | The engine records; the inspector selects only when told             | Interface     |
-| 044 | Commits carry the owner's identity, never a tool's                   | Governance    |
-| 045 | Every operation goes through one enforcement boundary                | Security      |
-| 046 | Denials are structured, and stable enough to be audited              | Security      |
-| 047 | Operations act on workspace-relative references                      | Security      |
-| 048 | Containment by resolution; a constructed, scope-bound boundary       | Security      |
-| 049 | Approval confirms an operation; it never opens a boundary            | Human control |
-| 050 | Operation egress and provider egress are separate allowlists         | Security      |
-| 051 | JEV is the decision layer, not the control plane                     | Decisions     |
-| 052 | Certainty is answered by code; judgement by the decision layer       | Decisions     |
-| 053 | A decision layer's output is untrusted; refusals are never delegated | Security      |
-| 054 | A decision assessment is advisory; state stays deterministic         | Human control |
-| 055 | The decision layer is scope-bound; candidates come from code         | Security      |
-| 056 | The brain decides whether to spend; code decides eligibility         | Decisions     |
+| ADR | Title                                                                  | Area          |
+| --- | ---------------------------------------------------------------------- | ------------- |
+| 001 | V2 is a foundation, not a framework                                    | Scope         |
+| 002 | Cheapest-sufficient-layer ladder for every decision                    | Architecture  |
+| 003 | Decisions are first-class, recorded entities                           | Decisions     |
+| 004 | JEV behind a `DecisionProvider` port, never mandatory                  | Decisions     |
+| 005 | Tasks are first-class; execution record lives in events                | Tasks         |
+| 006 | Event log is the single source of observability truth                  | Observability |
+| 007 | Money is integer micro-USD                                             | Cost          |
+| 008 | Cached tokens are a subset of input tokens                             | Tokens        |
+| 009 | Budgets are pure, provider-independent, evaluated twice                | Budgets       |
+| 010 | Workspace isolation is a declared capability profile                   | Isolation     |
+| 011 | Policy is pure, most-restrictive-wins, with risk floors                | Security      |
+| 012 | No database in Phase 2; local inspectable persistence later            | Storage       |
+| 013 | Branded ids and injected time; ISO-8601 UTC timestamps                 | Core          |
+| 014 | Additive non-destructive migration; no speculative directories         | Migration     |
+| 015 | Human approval is blocking, scoped, non-transferable                   | Human control |
+| 016 | Memory is project-scoped; AI knowledge stays `proposed`                | Memory        |
+| 017 | ADRs are human-decided; AI may draft only                              | Governance    |
+| 018 | Deterministic default context selector; bounded JEV assist             | Context       |
+| 019 | Trace replay exact; decision replay reports differences                | Replay        |
+| 020 | CLI is a thin adapter; zero mandatory runtime dependencies             | Interface     |
+| 021 | Dashboard deferred and removable                                       | Interface     |
+| 022 | Composition root is the only module naming an adapter                  | Architecture  |
+| 023 | Event first, projection second                                         | Observability |
+| 024 | Project configuration is JSON, not YAML                                | Configuration |
+| 025 | Project-scoped JSONL log, partitioned per workspace                    | Storage       |
+| 026 | Scope is inherited from context; session implies task                  | Traceability  |
+| 027 | A task id is not authorization; scope is explicit                      | Security      |
+| 028 | A run ends in `review`; a human closes the task                        | Human control |
+| 029 | Approval suspends; denial fails                                        | Policy        |
+| 030 | `ai doctor` checks only what it can know, honestly                     | Operations    |
+| 031 | Offline deterministic provider; illustrative rates only                | Providers     |
+| 032 | CLI is a pure dispatcher plus a process shim, no framework             | Interface     |
+| 033 | One real adapter speaks a protocol; credentials are references         | Providers     |
+| 034 | Retry is a bounded decorator over the provider port                    | Providers     |
+| 035 | Failures categorised; absent usage is unavailable, not zero            | Providers     |
+| 036 | Append coordination is a port with a local guarantee                   | Storage       |
+| 037 | A grant is single-use, scoped, and never widens permission             | Human control |
+| 038 | A stale task projection is refused before anything is spent            | Concurrency   |
+| 039 | Deterministic context selection; content is never an event             | Context       |
+| 040 | Explicit context budget; mandatory overflow is loud, no truncation     | Context       |
+| 041 | One ordered exclusion policy; repository text is data                  | Security      |
+| 042 | Change detection reports capability and degrades explicitly            | Context       |
+| 043 | The engine records; the inspector selects only when told               | Interface     |
+| 044 | Commits carry the owner's identity, never a tool's                     | Governance    |
+| 045 | Every operation goes through one enforcement boundary                  | Security      |
+| 046 | Denials are structured, and stable enough to be audited                | Security      |
+| 047 | Operations act on workspace-relative references                        | Security      |
+| 048 | Containment by resolution; a constructed, scope-bound boundary         | Security      |
+| 049 | Approval confirms an operation; it never opens a boundary              | Human control |
+| 050 | Operation egress and provider egress are separate allowlists           | Security      |
+| 051 | JEV is the decision layer, not the control plane                       | Decisions     |
+| 052 | Certainty is answered by code; judgement by the decision layer         | Decisions     |
+| 053 | A decision layer's output is untrusted; refusals are never delegated   | Security      |
+| 054 | A decision assessment is advisory; state stays deterministic           | Human control |
+| 055 | The decision layer is scope-bound; candidates come from code           | Security      |
+| 056 | The brain decides whether to spend; code decides eligibility           | Decisions     |
+| 057 | Availability is a declared window, judged by an injected clock         | Routing       |
+| 058 | The frontier executes one step; code filters and the brain reorders    | Routing       |
+| 059 | A bounded real coding path through the enforcement boundary            | Agent runtime |
+| 060 | Acceptance evidence is bound explicitly to a suite or named check      | Tasks         |
+| 061 | Completion is asked about a classified evidence shape                  | Decisions     |
+| 062 | A human acceptance verdict is explicit, named and recorded             | Tasks         |
+| 063 | The acceptance record is replayed against the events that wrote it     | Observability |
+| 064 | Skill payload integrity is verified against a canonical repository pin | Governance    |
 
 ---
 
@@ -1642,11 +2421,14 @@ _Phase G — the decision layer:_
   platform claims otherwise.
 - Distributed append coordination. The guarantee is local and is stated as such (ADR-036);
   single-writer-per-stream across machines is not provided.
-- The agent runtime is explicitly _simulated_: it makes a **real** provider call through the
-  configured adapter and performs one real, policy-checked workspace listing, but it performs no
-  engineering work (ADR-030 reports this as a warning). With `provider: "simulated"` the model call is
-  offline and deterministic too; with a real provider configured, the call is real and its usage,
-  latency, pricing and failures are recorded from what actually happened.
+- The agent runtime is selected per project. The default is explicitly _simulated_: it makes a **real**
+  provider call through the configured adapter and performs one real, policy-checked workspace listing,
+  but it performs no engineering work (ADR-030 reports this as a warning). With `provider: "simulated"`
+  the model call is offline and deterministic too; with a real provider configured, the call is real and
+  its usage, latency, pricing and failures are recorded from what actually happened. Setting
+  `agent.runner: "change-set"` selects a **bounded real coding path** whose writes and verification run
+  through the operation gateway, and whose declared named checks can supply criterion-bound acceptance
+  evidence (ADR-059, ADR-060). It is one-shot: no repair loop, no rollback and no autonomous loop.
 - The sandbox is an **in-process** boundary, not a container, a VM, a namespace or a seccomp filter.
   It cannot protect against an already-compromised host, a malicious native extension, or a child
   process that escapes by means other than the ones it filters. Its guarantees are the ones the tests

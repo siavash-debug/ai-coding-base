@@ -6,9 +6,11 @@ import { DomainError } from "../core/errors.js";
 import { type WorkspaceId, createUuidIdFactory } from "../core/ids.js";
 import { defaultPolicy } from "../decisions/policy.js";
 import { createSimulatedAgentRunner } from "../adapters/agent/simulated-agent-runner.js";
+import { createChangeSetAgentRunner } from "../adapters/agent/change-set-agent-runner.js";
 import {
   CONTEXT_SELECTION_VERSION,
   CONTEXT_STRATEGY,
+  DEFAULT_AGENT_CONFIG,
   DEFAULT_CONTEXT_CONFIG,
   DEFAULT_DECISION_CONFIG,
   DEFAULT_FRONTIER_CONFIG,
@@ -175,6 +177,15 @@ export interface Runtime {
   readonly contextConfig: ContextConfig;
   readonly runner: AgentRunner;
   readonly provider: LlmProvider;
+  /**
+   * The clock this runtime reads time from.
+   *
+   * Exposed because time is a routing input now that a model profile can declare an
+   * availability window: `ai models` and `ai doctor` report whether such a window has
+   * opened, and they must read the same clock the registry reads, or the catalog an
+   * operator sees would disagree with the candidates a plan builds.
+   */
+  readonly clock: Clock;
   readonly policy: ReturnType<typeof defaultPolicy>;
   /**
    * The decision layer for this workspace, and what it is.
@@ -286,6 +297,11 @@ export interface RuntimeOptions {
    * the orchestration and not the fake.
    */
   readonly frontier?: FrontierExecutor;
+  /**
+   * Overrides the configured agent runner, exactly as `provider` overrides the LLM
+   * provider. Used by tests to drive the change-set runner without a real model.
+   */
+  readonly runner?: AgentRunner;
 }
 
 /**
@@ -528,14 +544,64 @@ export async function openRuntime(options: RuntimeOptions): Promise<Runtime> {
       sleep,
     });
   const modelId = provider.models[0];
-  const runner = createSimulatedAgentRunner({
-    provider,
-    modelId,
-    clock,
-    ...(options.includeRetry === undefined
-      ? {}
-      : { includeRetry: options.includeRetry }),
-  });
+  /**
+   * The agent runner, chosen from configuration.
+   *
+   * Absent configuration means the offline `simulated` runner, so a project that
+   * says nothing keeps Phase C/E behaviour exactly. `change-set` selects the
+   * runner that turns a model's proposal into bounded writes and a verification
+   * command — every operation of which still goes through the operation gateway.
+   */
+  const agentConfig = config.agent ?? DEFAULT_AGENT_CONFIG;
+  const agentVerification = agentConfig.verification;
+  const runner =
+    options.runner ??
+    (agentConfig.runner === "change-set"
+      ? createChangeSetAgentRunner({
+          provider,
+          modelId,
+          clock,
+          // The whole-suite command is passed only when configured; named checks are
+          // passed as-is. Both are unchanged references: the runner still reaches the
+          // world only through the operation gateway.
+          ...(agentVerification?.command === undefined
+            ? {}
+            : {
+                verification: {
+                  command: agentVerification.command,
+                  args: agentVerification.args ?? [],
+                  ...(agentVerification.cwdRef === undefined
+                    ? {}
+                    : { cwdRef: agentVerification.cwdRef }),
+                  ...(agentVerification.timeoutMs === undefined
+                    ? {}
+                    : { timeoutMs: agentVerification.timeoutMs }),
+                },
+              }),
+          ...(agentVerification?.checks === undefined ||
+          agentVerification.checks.length === 0
+            ? {}
+            : { checks: agentVerification.checks }),
+          limits: {
+            ...(agentConfig.maxWriteBytes === undefined
+              ? {}
+              : { maxWriteBytes: agentConfig.maxWriteBytes }),
+            ...(agentConfig.maxChangeSetBytes === undefined
+              ? {}
+              : { maxChangeSetBytes: agentConfig.maxChangeSetBytes }),
+            ...(agentConfig.maxChangeSetFiles === undefined
+              ? {}
+              : { maxChangeSetFiles: agentConfig.maxChangeSetFiles }),
+          },
+        })
+      : createSimulatedAgentRunner({
+          provider,
+          modelId,
+          clock,
+          ...(options.includeRetry === undefined
+            ? {}
+            : { includeRetry: options.includeRetry }),
+        }));
 
   const tasks = createTaskService({
     repository,
@@ -661,7 +727,13 @@ export async function openRuntime(options: RuntimeOptions): Promise<Runtime> {
    * bound to the guarded transport: no orchestration path can reach a vendor host
    * that policy has not allowed (ADR-050, ADR-056).
    */
-  const registry = createModelRegistry({ models: config.frontier.models });
+  // The clock travels with the registry: a model profile may declare an availability
+  // window, and judging it is a question about *now* that only an injected clock can
+  // answer (ADR-057).
+  const registry = createModelRegistry({
+    models: config.frontier.models,
+    clock,
+  });
   const frontierProviders = buildFrontierProviders(config.frontier, {
     clock,
     environment,
@@ -752,6 +824,7 @@ export async function openRuntime(options: RuntimeOptions): Promise<Runtime> {
   return {
     projectRoot: options.projectRoot,
     config,
+    clock,
     project,
     workspace,
     store,
@@ -840,6 +913,15 @@ export interface InitializeProjectOptions {
    * *unpriced* rather than becoming free.
    */
   readonly modelRates?: readonly ModelRate[];
+  /**
+   * Build and validate the project without writing anything.
+   *
+   * The existence check still runs, so a dry run reports the same `CONFLICT` a real
+   * run would. What is skipped is every side effect: no directory is created and no
+   * configuration is written. Callers get the same result shape, so the CLI renders
+   * one path for both.
+   */
+  readonly dryRun?: boolean;
 }
 
 export interface InitializeProjectResult {
@@ -893,8 +975,6 @@ export async function initializeProject(
     },
   );
 
-  await mkdir(options.projectRoot, { recursive: true });
-  await ensureRuntimeLayout(options.projectRoot);
   const config: ProjectConfig = {
     schemaVersion: 1,
     project: initial.project,
@@ -906,6 +986,10 @@ export async function initializeProject(
     decision: options.decision ?? DEFAULT_DECISION_CONFIG,
     frontier: options.frontier ?? DEFAULT_FRONTIER_CONFIG,
   };
-  await writeProjectConfig(options.projectRoot, config);
+  if (options.dryRun !== true) {
+    await mkdir(options.projectRoot, { recursive: true });
+    await ensureRuntimeLayout(options.projectRoot);
+    await writeProjectConfig(options.projectRoot, config);
+  }
   return { config, configPath, initial };
 }

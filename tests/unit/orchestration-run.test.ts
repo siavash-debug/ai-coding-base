@@ -23,6 +23,7 @@ import {
   VISION_MODEL,
   createScriptedFrontier,
   frontierConfig,
+  frontierModel,
   ratesFor,
   type ScriptedFrontier,
   type ScriptedFrontierStep,
@@ -202,6 +203,93 @@ function run(
   } as never);
 }
 
+/**
+ * The completion confidence gate, end to end.
+ *
+ * The real orchestrator, the real decision coordinator and the real event log, with a
+ * decision layer that answers `complete` at whatever confidence the test chooses. What
+ * is asserted is the *outcome*, not the plumbing: an unsure "done" must not decide that
+ * a task is done, and a confident one must not be penalised for it.
+ */
+describe("the completion confidence gate, end to end", () => {
+  it("withholds an unsure complete verdict and requires a human", async () => {
+    const test = await scenario({
+      title: "Fix the parser bug in src/parser.ts",
+      steps: [{ content: "Fixed src/parser.ts", usage: FIXTURE_USAGE }],
+      overrides: {
+        completion: {
+          outcome: "selected",
+          optionId: "complete",
+          reasonCode: "verification-passed",
+          confidence: 0.66,
+        },
+      },
+    });
+
+    const result = await run(test.runtime, test.taskId);
+
+    // The layer did answer `complete`, and the step did succeed — the platform simply
+    // refuses to treat that as done.
+    expect(result.steps[0]?.status).toBe("completed");
+    expect(result.completionAssessment).toBe("uncertain");
+    expect(result.needsHumanReview).toBe(true);
+
+    // The gate is the reason for review here, and it is visible in the question the
+    // escalation decision was actually asked: a withheld verdict is evidence a human
+    // should weigh, not a detail the platform keeps to itself.
+    const escalation = test.decision.requests.find(
+      (request) => request.kind === "human-escalation",
+    );
+    expect(
+      escalation?.context?.some((entry) =>
+        entry.startsWith("fact:completion-confidence-below-minimum"),
+      ),
+    ).toBe(true);
+  });
+
+  it("acts on a confident complete verdict", async () => {
+    const test = await scenario({
+      title: "Fix the parser bug in src/parser.ts",
+      steps: [{ content: "Fixed src/parser.ts", usage: FIXTURE_USAGE }],
+      overrides: {
+        completion: {
+          outcome: "selected",
+          optionId: "complete",
+          reasonCode: "verification-passed",
+          confidence: 0.95,
+        },
+      },
+    });
+
+    const result = await run(test.runtime, test.taskId);
+
+    // Confidence above the configured minimum is not penalised: the gate withholds
+    // verdicts, it does not distrust the layer.
+    expect(result.completionAssessment).toBe("complete");
+    expect(result.needsHumanReview).toBe(false);
+  });
+
+  it("does not withhold a verdict that carries no confidence", async () => {
+    const test = await scenario({
+      title: "Fix the parser bug in src/parser.ts",
+      steps: [{ content: "Fixed src/parser.ts", usage: FIXTURE_USAGE }],
+      overrides: {
+        completion: {
+          outcome: "selected",
+          optionId: "complete",
+          reasonCode: "verification-passed",
+        },
+      },
+    });
+
+    const result = await run(test.runtime, test.taskId);
+
+    // Absent is not low. A layer that reports no confidence is not treated as an
+    // unsure one, because this platform never reads an absent value as zero (ADR-035).
+    expect(result.completionAssessment).toBe("complete");
+  });
+});
+
 describe("orchestration is opt-in", () => {
   it("refuses to run when routing is not enabled, without touching the log", async () => {
     const test = await scenario({
@@ -375,6 +463,69 @@ describe("capability-aware routing", () => {
         (entry) => entry.modelId === TEXT_MODEL.modelId,
       ),
     ).toMatchObject({ missing: ["capability:vision", "input:image"] });
+  });
+
+  it("keeps a model out of the plan until its declared window opens", async () => {
+    // Announced by the vendor and not served by it yet. Nothing about the task excludes
+    // this model — its capabilities match — so the window is the only thing keeping it
+    // out, and a plan that routed to it would spend a call the provider refuses.
+    const announced = frontierModel({
+      modelId: "vendor/announced:free",
+      providerId: "openrouter",
+      displayName: "Announced",
+      capabilities: ["general", "reasoning", "coding"],
+      operational: {
+        free: true,
+        status: "active",
+        availableFrom: "2026-09-25T17:00:00.000Z",
+      },
+    });
+    const test = await scenario({
+      title: "Summarise the module layout",
+      models: [announced, TEXT_MODEL],
+    });
+
+    const result = await run(test.runtime, test.taskId, {
+      requirements: { requiredCapabilities: ["reasoning"] },
+    });
+
+    expect(result.eligibleModelIds).toEqual([TEXT_MODEL.modelId]);
+    expect(
+      result.rejectedModels.find((entry) => entry.modelId === announced.modelId)
+        ?.reasonCode,
+    ).toBe("not-available-yet");
+    // The one call went to the model that is actually being served.
+    expect(test.frontier.requests.map((request) => request.modelId)).toEqual([
+      TEXT_MODEL.modelId,
+    ]);
+  });
+
+  it("admits that same model once its window has passed, with no operator act", async () => {
+    const opened = frontierModel({
+      modelId: "vendor/announced:free",
+      providerId: "openrouter",
+      displayName: "Announced",
+      capabilities: ["general", "reasoning", "coding"],
+      operational: {
+        free: true,
+        status: "active",
+        // The test workshop's clock is 2026-09-20, so this window is already open.
+        availableFrom: "2026-09-01T00:00:00.000Z",
+      },
+    });
+    const test = await scenario({
+      title: "Summarise the module layout",
+      models: [opened, TEXT_MODEL],
+    });
+
+    const result = await run(test.runtime, test.taskId, {
+      requirements: { requiredCapabilities: ["reasoning"] },
+    });
+
+    expect(result.eligibleModelIds).toContain(opened.modelId);
+    expect(
+      result.rejectedModels.find((entry) => entry.modelId === opened.modelId),
+    ).toBeUndefined();
   });
 
   it("refuses to plan when nothing registered can do the work", async () => {

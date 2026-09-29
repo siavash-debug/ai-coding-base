@@ -58,6 +58,7 @@ export interface LocalSandboxOptions {
   readonly platform?: string;
   readonly maxReadBytes?: number;
   readonly maxListEntries?: number;
+  readonly maxWriteBytes?: number;
   readonly maxOutputBytes?: number;
 }
 
@@ -83,6 +84,9 @@ export function createLocalSandbox(options: LocalSandboxOptions): LocalSandbox {
     ...(options.maxListEntries === undefined
       ? {}
       : { maxListEntries: options.maxListEntries }),
+    ...(options.maxWriteBytes === undefined
+      ? {}
+      : { maxWriteBytes: options.maxWriteBytes }),
     ...(options.platform === undefined ? {} : { platform: options.platform }),
   });
   const processBoundary = createLocalProcessBoundary({

@@ -1,10 +1,19 @@
 import type { ApprovalState } from "../../application/approval-ledger.js";
+import type { RunOutcome, RunPlan } from "../../application/run-task.js";
+import type { OrchestrationPlan } from "../../orchestration/orchestrator.js";
 import type { TaskTrace } from "../../application/trace.js";
 import { toIsoString } from "../../core/clock.js";
 import { DomainError } from "../../core/errors.js";
 import { isValidId, taskId as toTaskId } from "../../core/ids.js";
 import type { TaskId } from "../../core/ids.js";
 import { RISK_LEVELS, type RiskLevel } from "../../decisions/risk.js";
+import {
+  ACCEPTANCE_VERDICT_STATUSES,
+  type AcceptanceCriterionEvidenceBinding,
+  type AcceptanceCriterionInput,
+  type AcceptanceVerdictStatus,
+  type Task,
+} from "../../tasks/task.js";
 import { microsFromDollars } from "../../observability/cost.js";
 import {
   type FlagSpec,
@@ -18,7 +27,15 @@ import {
   requireFlag,
   requirePositional,
 } from "../args.js";
-import { EXIT_FAILURE, EXIT_OK, type CliEnv, type CliIo } from "../io.js";
+import {
+  EXIT_APPROVAL_REQUIRED,
+  EXIT_BUDGET_EXCEEDED,
+  EXIT_FAILURE,
+  EXIT_OK,
+  EXIT_POLICY_DENIED,
+  type CliEnv,
+  type CliIo,
+} from "../io.js";
 import {
   openRuntimeFor,
   readScope,
@@ -59,6 +76,20 @@ const COMMON_SPECS: readonly FlagSpec[] = [
   { name: "help", value: false, aliases: ["h"], description: "show this help" },
 ];
 
+/**
+ * The `--dry-run` spec, shared by every mutating subcommand.
+ *
+ * A dry run validates, resolves and reports what *would* happen and performs
+ * nothing. It is never "do it, then throw the result away": each command's dry-run
+ * branch calls a planning seam that stops before the first write (or provider or
+ * agent call), so no side effect exists to discard.
+ */
+const DRY_RUN_SPEC: FlagSpec = {
+  name: "dry-run",
+  value: false,
+  description: "validate and report what would happen, without performing it",
+};
+
 const CREATE_SPECS: readonly FlagSpec[] = [
   {
     name: "title",
@@ -84,6 +115,14 @@ const CREATE_SPECS: readonly FlagSpec[] = [
     multiple: true,
     placeholder: "text",
     description: "acceptance criterion (repeatable)",
+  },
+  {
+    name: "acceptance-verified-by",
+    value: true,
+    multiple: true,
+    placeholder: "<criterion-id>=<suite>[#<check>]",
+    description:
+      "bind a criterion (AC-1, AC-2, …) to the verification suite — or one named check inside it — that assesses it (repeatable)",
   },
   {
     name: "constraint",
@@ -123,6 +162,7 @@ const CREATE_SPECS: readonly FlagSpec[] = [
     placeholder: "minutes",
     description: "wall-clock budget in minutes",
   },
+  DRY_RUN_SPEC,
   ...COMMON_SPECS,
 ];
 
@@ -133,6 +173,42 @@ const COMPLETE_SPECS: readonly FlagSpec[] = [
     placeholder: "text",
     description: "why the task is being closed",
   },
+  DRY_RUN_SPEC,
+  ...COMMON_SPECS,
+];
+
+/**
+ * `ai task verdict` — the one command that asserts a criterion as a human.
+ *
+ * `--by` is required for the same reason `--approver` is: a criterion a person decides
+ * must name the person, or the record would claim an authority with nobody behind it.
+ */
+const VERDICT_SPECS: readonly FlagSpec[] = [
+  {
+    name: "criterion",
+    value: true,
+    placeholder: "AC-n",
+    description: "acceptance criterion to decide (required)",
+  },
+  {
+    name: "status",
+    value: true,
+    placeholder: ACCEPTANCE_VERDICT_STATUSES.join(" | "),
+    description: `what the criterion becomes (required; one of ${ACCEPTANCE_VERDICT_STATUSES.join(", ")})`,
+  },
+  {
+    name: "by",
+    value: true,
+    placeholder: "name",
+    description: "who is taking responsibility for the verdict (required)",
+  },
+  {
+    name: "note",
+    value: true,
+    placeholder: "text",
+    description: "why — recorded in the output only, never in the log",
+  },
+  DRY_RUN_SPEC,
   ...COMMON_SPECS,
 ];
 
@@ -148,6 +224,7 @@ const CONTEXT_SPECS: readonly FlagSpec[] = [
     value: false,
     description: "show why each candidate was selected or excluded",
   },
+  DRY_RUN_SPEC,
   ...COMMON_SPECS,
 ];
 
@@ -180,10 +257,15 @@ const ORCHESTRATE_SPECS: readonly FlagSpec[] = [
     description:
       "declare an independent sub-task, enabling parallel execution (repeatable)",
   },
+  DRY_RUN_SPEC,
   ...COMMON_SPECS,
 ];
 
+/** `ai task run` can plan without executing, so it accepts `--dry-run`. */
+const RUN_SPECS: readonly FlagSpec[] = [DRY_RUN_SPEC, ...COMMON_SPECS];
+
 const APPROVE_SPECS: readonly FlagSpec[] = [
+  DRY_RUN_SPEC,
   {
     name: "approver",
     value: true,
@@ -211,6 +293,31 @@ const APPROVE_SPECS: readonly FlagSpec[] = [
   ...COMMON_SPECS,
 ];
 
+/**
+ * Maps a task execution outcome to its exit code (V2-ARCHITECTURE §25.2).
+ *
+ * The mapping is total over `RunOutcome`, so a new outcome cannot be added without
+ * deciding its exit code here. `provider-failed` and `verification-failed` are
+ * ordinary failures (`1`): nothing about them is a policy refusal, a budget stop or
+ * a pending human decision.
+ */
+function runOutcomeExitCode(outcome: RunOutcome): number {
+  switch (outcome) {
+    case "awaiting-review":
+      return EXIT_OK;
+    case "policy-denied":
+      return EXIT_POLICY_DENIED;
+    case "budget-exceeded":
+    case "context-budget-exceeded":
+      return EXIT_BUDGET_EXCEEDED;
+    case "awaiting-approval":
+      return EXIT_APPROVAL_REQUIRED;
+    case "provider-failed":
+    case "verification-failed":
+      return EXIT_FAILURE;
+  }
+}
+
 /** Per-subcommand usage and specs, for `--help` and for error messages. */
 const SUBCOMMANDS: Readonly<
   Record<
@@ -219,7 +326,8 @@ const SUBCOMMANDS: Readonly<
   >
 > = {
   create: {
-    usage: "ai task create --title <text> --description <text> [options]",
+    usage:
+      "ai task create --title <text> --description <text> [--dry-run] [options]",
     specs: CREATE_SPECS,
   },
   list: {
@@ -227,15 +335,19 @@ const SUBCOMMANDS: Readonly<
     specs: COMMON_SPECS,
   },
   status: { usage: "ai task status <task-id> [--json]", specs: COMMON_SPECS },
-  run: { usage: "ai task run <task-id> [--json]", specs: COMMON_SPECS },
+  run: {
+    usage: "ai task run <task-id> [--dry-run] [--json]",
+    specs: RUN_SPECS,
+  },
   orchestrate: {
     usage:
-      "ai task orchestrate <task-id> [--context] [--require <capability>] [--specialize <domain>] [--subtask <instruction>] [--json]",
+      "ai task orchestrate <task-id> [--context] [--require <capability>] [--specialize <domain>] [--subtask <instruction>] [--dry-run] [--json]",
     specs: ORCHESTRATE_SPECS,
   },
   trace: { usage: "ai task trace <task-id> [--json]", specs: COMMON_SPECS },
   context: {
-    usage: "ai task context <task-id> [--select] [--explain] [--json]",
+    usage:
+      "ai task context <task-id> [--select] [--explain] [--dry-run] [--json]",
     specs: CONTEXT_SPECS,
   },
   usage: { usage: "ai task usage <task-id> [--json]", specs: COMMON_SPECS },
@@ -245,12 +357,17 @@ const SUBCOMMANDS: Readonly<
   },
   cost: { usage: "ai task cost <task-id> [--json]", specs: COMMON_SPECS },
   complete: {
-    usage: "ai task complete <task-id> [--reason <text>] [--json]",
+    usage: "ai task complete <task-id> [--reason <text>] [--dry-run] [--json]",
     specs: COMPLETE_SPECS,
+  },
+  verdict: {
+    usage:
+      "ai task verdict <task-id> --criterion <AC-n> --status <met|not-met|waived> --by <name> [--note <text>] [--dry-run]",
+    specs: VERDICT_SPECS,
   },
   approve: {
     usage:
-      "ai task approve <task-id> --approver <name> [--request <id>] [--expires-in <minutes>] [--resume]",
+      "ai task approve <task-id> --approver <name> [--request <id>] [--expires-in <minutes>] [--resume] [--dry-run]",
     specs: APPROVE_SPECS,
   },
 };
@@ -318,6 +435,85 @@ function requireKnownTask(trace: TaskTrace, id: TaskId): TaskTrace {
 
 function emit(io: CliIo, json: boolean, value: unknown, text: string): void {
   io.out(json ? JSON.stringify(value, null, 2) : text);
+}
+
+/**
+ * Renders the task a dry run *would* produce, without pretending it exists.
+ *
+ * The wording is deliberate: "would create" describes a plan, not a fact. Nothing
+ * was written, and the trailing line says so, because a dry run that looked like a
+ * real result would be worse than no dry run at all.
+ */
+/**
+ * Reads `--status` as one of the verdicts a human may assert.
+ *
+ * Refused rather than defaulted: a typo that silently became a different verdict would
+ * put a decision in the record that nobody made.
+ */
+function verdictStatus(value: string): AcceptanceVerdictStatus {
+  if (!ACCEPTANCE_VERDICT_STATUSES.includes(value as AcceptanceVerdictStatus)) {
+    throw new UsageError(
+      `option "--status" must be one of: ${ACCEPTANCE_VERDICT_STATUSES.join(", ")} (got "${value}")`,
+    );
+  }
+  return value as AcceptanceVerdictStatus;
+}
+
+/** Renders the criterion a `--dry-run` verdict *would* produce, and says it did not. */
+function formatVerdictPlan(
+  planned: Task,
+  criterionId: string,
+  status: AcceptanceVerdictStatus,
+  verdictBy: string,
+): string {
+  const criterion = planned.acceptanceCriteria.find(
+    (entry) => entry.id === criterionId,
+  );
+  return [
+    `Dry run: would record "${status}" for ${criterionId} on task ${planned.id}, by ${verdictBy}.`,
+    ...(criterion === undefined
+      ? []
+      : [
+          `  criterion  ${criterion.statement}`,
+          `  becomes    ${status}  (recorded as a human verdict by ${verdictBy})`,
+        ]),
+    "No event was written and no task projection was changed (dry run).",
+  ].join("\n");
+}
+
+function formatDryRunTask(task: Task, action: "create" | "complete"): string {
+  return [
+    `Dry run: would ${action} task ${task.id}`,
+    `  title      ${task.title}`,
+    `  status     ${task.status}`,
+    `  risk       ${task.riskLevel}`,
+    "No event was written and no task projection was changed (dry run).",
+  ].join("\n");
+}
+
+/** Renders the plan `ai task orchestrate --dry-run` produced: a plan, not a run. */
+function formatOrchestrationPlan(plan: OrchestrationPlan): string {
+  return [
+    `Dry run: plan only — task ${plan.taskId} was not orchestrated`,
+    `  status     ${plan.taskStatus}`,
+    `  eligible   ${plan.eligibleModelIds.length === 0 ? "(none)" : plan.eligibleModelIds.join(", ")}`,
+    `  variants   ${plan.variants.map((variant) => variant.planId).join(", ")}`,
+    "No provider, decision-layer or agent call was made, and no session or event was recorded (dry run).",
+  ].join("\n");
+}
+
+/** Renders the plan `ai task run --dry-run` produced: a plan, not a result. */
+function formatRunPlan(plan: RunPlan): string {
+  return [
+    `Dry run: plan only — task ${plan.taskId} was not run`,
+    `  status     ${plan.taskStatus}`,
+    `  risk       ${plan.riskLevel}`,
+    `  approval   ${plan.requiresHumanApproval ? "required before any work" : "not required"}`,
+    `  envelope   ${plan.capabilityEnvelope.length === 0 ? "none" : plan.capabilityEnvelope.join(", ")}`,
+    "  steps:",
+    ...plan.steps.map((step) => `    - ${step}`),
+    "No provider, decision-layer or agent call was made, and nothing was recorded (dry run).",
+  ].join("\n");
 }
 
 /**
@@ -392,6 +588,57 @@ function resolveApprovalTarget(
   return first;
 }
 
+/**
+ * Builds the acceptance-criteria input from `--acceptance` and `--acceptance-verified-by`.
+ *
+ * Criteria are numbered `AC-1`, `AC-2`, … in the order the `--acceptance` flags appear,
+ * the same deterministic numbering the task domain applies. A binding names an id and a
+ * verification suite — the name the runtime records for one verification it performed,
+ * e.g. `verification-command` for the configured verification command — optionally
+ * narrowed to one named check with `#<check>`, the operator-declared id reported for an
+ * individual check. An unknown id or a malformed binding is refused rather than dropped,
+ * because a criterion that looked bound but was not would be a false assurance.
+ */
+function acceptanceCriteriaInput(
+  args: ParsedArgs,
+): readonly AcceptanceCriterionInput[] {
+  const statements = flagValues(args, "acceptance");
+  const bound = new Map<string, AcceptanceCriterionEvidenceBinding>();
+  for (const entry of flagValues(args, "acceptance-verified-by")) {
+    const separator = entry.indexOf("=");
+    const id = separator === -1 ? "" : entry.slice(0, separator).trim();
+    const target = separator === -1 ? "" : entry.slice(separator + 1).trim();
+    const hash = target.indexOf("#");
+    const suite = (hash === -1 ? target : target.slice(0, hash)).trim();
+    const check = hash === -1 ? undefined : target.slice(hash + 1).trim();
+    if (id === "" || suite === "" || (check !== undefined && check === "")) {
+      throw new UsageError(
+        `option "--acceptance-verified-by" expects <criterion-id>=<suite>[#<check>] (got "${entry}")`,
+      );
+    }
+    if (bound.has(id)) {
+      throw new UsageError(`criterion "${id}" is bound more than once`);
+    }
+    bound.set(id, {
+      suite,
+      ...(check === undefined ? {} : { check }),
+    });
+  }
+  const known = statements.map((_, index) => `AC-${index + 1}`);
+  for (const id of bound.keys()) {
+    if (!known.includes(id)) {
+      throw new UsageError(
+        `option "--acceptance-verified-by" names "${id}", but the task declares ` +
+          `${statements.length} criterion(s) (${known.join(", ") || "none"})`,
+      );
+    }
+  }
+  return statements.map((statement, index) => {
+    const verifiedBy = bound.get(`AC-${index + 1}`);
+    return verifiedBy === undefined ? { statement } : { statement, verifiedBy };
+  });
+}
+
 export async function runTaskCommand(
   argv: readonly string[],
   io: CliIo,
@@ -449,18 +696,33 @@ export async function runTaskCommand(
         budget.maxDurationMs = maxDurationMin * 60_000;
       }
 
-      const stored = await runtime.tasks.create(
-        {
-          title: requireFlag(args, "title"),
-          description: requireFlag(args, "description"),
-          ...(risk === undefined ? {} : { riskLevel: risk as RiskLevel }),
-          context: flagValues(args, "context"),
-          constraints: flagValues(args, "constraint"),
-          acceptanceCriteria: flagValues(args, "acceptance"),
-          budget,
-        },
-        { project: runtime.project, workspace: runtime.workspace },
-      );
+      const input = {
+        title: requireFlag(args, "title"),
+        description: requireFlag(args, "description"),
+        ...(risk === undefined ? {} : { riskLevel: risk as RiskLevel }),
+        context: flagValues(args, "context"),
+        constraints: flagValues(args, "constraint"),
+        acceptanceCriteria: acceptanceCriteriaInput(args),
+        budget,
+      };
+      const context = {
+        project: runtime.project,
+        workspace: runtime.workspace,
+      };
+
+      // Dry run: the same domain constructor and validation, none of the writing.
+      if (flagBool(args, "dry-run")) {
+        const planned = runtime.tasks.planCreate(input, context);
+        emit(
+          io,
+          json,
+          { dryRun: true, wouldCreate: planned },
+          formatDryRunTask(planned, "create"),
+        );
+        return EXIT_OK;
+      }
+
+      const stored = await runtime.tasks.create(input, context);
       emit(io, json, stored, formatTask(stored));
       return EXIT_OK;
     }
@@ -553,24 +815,32 @@ export async function runTaskCommand(
         return EXIT_OK;
       }
 
+      const dryRun = flagBool(args, "dry-run");
       const stored = await runtime.tasks.load(scope, id);
+      // A dry run computes the identical selection and records nothing, so the
+      // engine is asked not to write the two events a real `--select` would emit.
       const selected = await selectContextForTask(
         {
           context: runtime.context,
           contextConfig: runtime.contextConfig,
         },
         stored.task,
+        dryRun ? { record: false } : undefined,
       );
       if (json) {
         io.out(JSON.stringify(selected.selection, null, 2));
-        return selected.selection.budgetExceeded ? EXIT_FAILURE : EXIT_OK;
+        return selected.selection.budgetExceeded
+          ? EXIT_BUDGET_EXCEEDED
+          : EXIT_OK;
       }
       io.out(formatContextSelection(selected.selection, { explain: true }));
       io.out("");
       io.out(
-        `Recorded selection ${selected.selection.selectionId} for task ${id}.`,
+        dryRun
+          ? `Dry run: selection ${selected.selection.selectionId} was computed but not recorded for task ${id}.`
+          : `Recorded selection ${selected.selection.selectionId} for task ${id}.`,
       );
-      return selected.selection.budgetExceeded ? EXIT_FAILURE : EXIT_OK;
+      return selected.selection.budgetExceeded ? EXIT_BUDGET_EXCEEDED : EXIT_OK;
     }
 
     case "cost": {
@@ -588,10 +858,19 @@ export async function runTaskCommand(
 
     case "run": {
       const runtime = await openRuntimeFor(args, env);
-      requireProviderCredentials(runtime);
       const scope = readScope(runtime, args);
       const id = positionalTaskId(args);
       const stored = await runtime.tasks.load(scope, id);
+
+      // Dry run: plan only. It makes no provider call, so it needs no credential,
+      // and it opens no session and writes no event (see `RunTask.plan`).
+      if (flagBool(args, "dry-run")) {
+        const plan = await runtime.runTask.plan(stored);
+        emit(io, json, { dryRun: true, plan }, formatRunPlan(plan));
+        return EXIT_OK;
+      }
+
+      requireProviderCredentials(runtime);
       const result = await runtime.runTask.run(stored);
 
       if (json) {
@@ -601,16 +880,54 @@ export async function runTaskCommand(
         io.out("");
         io.out(formatUsage(await runtime.traces.read(scope, id)));
       }
-      // Zero only when the attempt reached review: anything else needs attention.
-      return result.outcome === "awaiting-review" ? EXIT_OK : EXIT_FAILURE;
+      // The outcome carries the domain meaning: a denial, a budget stop or a
+      // suspension is not an ordinary failure.
+      return runOutcomeExitCode(result.outcome);
     }
 
     case "orchestrate": {
       const runtime = await openRuntimeFor(args, env);
-      requireProviderCredentials(runtime);
       const scope = readScope(runtime, args);
       const id = positionalTaskId(args);
       const stored = await runtime.tasks.load(scope, id);
+
+      const requiredCapabilities = flagValues(args, "require");
+      const requiredSpecializations = flagValues(args, "specialize");
+      const subTasks = flagValues(args, "subtask").map(
+        (instruction, index) => ({
+          id: `subtask-${index + 1}`,
+          instruction,
+          requiredCapabilities: ["reasoning"],
+        }),
+      );
+      const requirements =
+        requiredCapabilities.length === 0 &&
+        requiredSpecializations.length === 0
+          ? undefined
+          : {
+              ...(requiredCapabilities.length === 0
+                ? {}
+                : { requiredCapabilities }),
+              ...(requiredSpecializations.length === 0
+                ? {}
+                : { requiredSpecializations }),
+            };
+
+      // Dry run: build the deterministic plan and stop. No credential is required
+      // because no model is called, and no context is selected because selecting it
+      // records events (see `Orchestrator.plan`).
+      if (flagBool(args, "dry-run")) {
+        const plan = await runtime.orchestrator.plan({
+          workspaceId: runtime.workspace.id,
+          taskId: id,
+          ...(requirements === undefined ? {} : { requirements }),
+          ...(subTasks.length === 0 ? {} : { subTasks }),
+        });
+        emit(io, json, { dryRun: true, plan }, formatOrchestrationPlan(plan));
+        return EXIT_OK;
+      }
+
+      requireProviderCredentials(runtime);
 
       // Context is *selected* here and passed to the model; what is recorded is the
       // selection reference and its token count, never the file contents.
@@ -632,21 +949,12 @@ export async function runTaskCommand(
             `(${selection.selection.selectedTokens}/${selection.selection.budgetTokens} tokens); ` +
             `no model call was made`,
         );
-        return EXIT_FAILURE;
+        return EXIT_BUDGET_EXCEEDED;
       }
 
       // Consumption already recorded for this task, so the task budget is a hard
       // bound across runs rather than a per-run limit.
       const prior = await runtime.traces.read(scope, id);
-      const requiredCapabilities = flagValues(args, "require");
-      const requiredSpecializations = flagValues(args, "specialize");
-      const subTasks = flagValues(args, "subtask").map(
-        (instruction, index) => ({
-          id: `subtask-${index + 1}`,
-          instruction,
-          requiredCapabilities: ["reasoning"],
-        }),
-      );
 
       const result = await runtime.orchestrator.run({
         workspaceId: runtime.workspace.id,
@@ -666,19 +974,7 @@ export async function runTaskCommand(
               contextSelectionVersion: selection.selection.selectionVersion,
               contextSelectedTokens: selection.selection.selectedTokens,
             }),
-        ...(requiredCapabilities.length === 0 &&
-        requiredSpecializations.length === 0
-          ? {}
-          : {
-              requirements: {
-                ...(requiredCapabilities.length === 0
-                  ? {}
-                  : { requiredCapabilities }),
-                ...(requiredSpecializations.length === 0
-                  ? {}
-                  : { requiredSpecializations }),
-              },
-            }),
+        ...(requirements === undefined ? {} : { requirements }),
         ...(subTasks.length === 0 ? {} : { subTasks }),
       });
 
@@ -712,6 +1008,7 @@ export async function runTaskCommand(
       // `--resume` continues an attempt that already has an unused grant; it does
       // not need — and must not be given — a second, redundant grant.
       const answerable = explicit !== undefined || pending.length > 0;
+      const dryRun = flagBool(args, "dry-run");
       let target: ApprovalState | undefined;
       if (answerable) {
         target = resolveApprovalTarget(states, explicit, id);
@@ -728,6 +1025,38 @@ export async function runTaskCommand(
                 new Date(env.clock.now().getTime() + expiresIn * 60_000),
               );
 
+        // Dry run: validate the same target and report the grant that *would* be
+        // recorded — without recording it, and without resuming anything. The
+        // required `--approver` is still checked, so a dry run refuses what a real
+        // run would refuse.
+        if (dryRun) {
+          const approver = requireFlag(args, "approver");
+          io.out(
+            json
+              ? JSON.stringify(
+                  {
+                    dryRun: true,
+                    wouldGrantApproval: {
+                      requestId: target.requestId,
+                      riskLevel: target.riskLevel,
+                      approver,
+                      ...(expiresAt === undefined ? {} : { expiresAt }),
+                    },
+                    wouldResume: resume,
+                  },
+                  null,
+                  2,
+                )
+              : [
+                  `Dry run: would grant approval ${target.requestId} to ${approver} for task ${id}.`,
+                  resume
+                    ? "Dry run: the suspended attempt would then be resumed; nothing was run."
+                    : "Nothing was recorded (dry run).",
+                ].join("\n"),
+          );
+          return EXIT_OK;
+        }
+
         await runtime.approvals.grant({
           workspaceId: stored.task.workspaceId,
           taskId: stored.task.id,
@@ -741,6 +1070,26 @@ export async function runTaskCommand(
         });
       } else if (!(resume && usable.length > 0)) {
         throw new UsageError(noPendingMessage(id, states));
+      }
+
+      // Resuming an existing grant needs no new approval: a dry run reports that
+      // the attempt would continue and stops before the run use case is reached.
+      if (dryRun) {
+        io.out(
+          json
+            ? JSON.stringify(
+                { dryRun: true, wouldGrantApproval: null, wouldResume: resume },
+                null,
+                2,
+              )
+            : [
+                `Dry run: no new approval would be granted for task ${id}.`,
+                resume
+                  ? `Dry run: the suspended attempt would be resumed with the existing grant; nothing was run.`
+                  : "Nothing was recorded (dry run).",
+              ].join("\n"),
+        );
+        return EXIT_OK;
       }
 
       if (!resume) {
@@ -772,7 +1121,7 @@ export async function runTaskCommand(
         io.out("");
         io.out(formatUsage(await runtime.traces.read(scope, id)));
       }
-      return result.outcome === "awaiting-review" ? EXIT_OK : EXIT_FAILURE;
+      return runOutcomeExitCode(result.outcome);
     }
 
     case "complete": {
@@ -782,8 +1131,68 @@ export async function runTaskCommand(
         positionalTaskId(args),
       );
       const reason = flagValue(args, "reason") ?? "completed by human review";
+
+      // Dry run: compute the transition (so an illegal close still refuses) without
+      // recording the event or rewriting the projection.
+      if (flagBool(args, "dry-run")) {
+        const planned = runtime.tasks.planComplete(stored);
+        emit(
+          io,
+          json,
+          { dryRun: true, wouldComplete: planned },
+          formatDryRunTask(planned, "complete"),
+        );
+        return EXIT_OK;
+      }
+
       const completed = await runtime.tasks.complete(stored, reason);
       emit(io, json, completed, formatTask(completed));
+      return EXIT_OK;
+    }
+
+    case "verdict": {
+      const runtime = await openRuntimeFor(args, env);
+      const stored = await runtime.tasks.load(
+        readScope(runtime, args),
+        positionalTaskId(args),
+      );
+      const criterionId = requireFlag(args, "criterion");
+      const status = verdictStatus(requireFlag(args, "status"));
+      const verdictBy = requireFlag(args, "by");
+      const verdict = { criterionId, status, verdictBy };
+
+      // Dry run: the same domain mutation (so an unknown criterion or a terminal task
+      // still refuses), with no event and no save.
+      if (flagBool(args, "dry-run")) {
+        const planned = runtime.tasks.planAcceptanceVerdict(stored, verdict);
+        emit(
+          io,
+          json,
+          { dryRun: true, wouldRecordVerdict: verdict, task: planned },
+          formatVerdictPlan(planned, criterionId, status, verdictBy),
+        );
+        return EXIT_OK;
+      }
+
+      const recorded = await runtime.tasks.recordAcceptanceVerdict(
+        stored,
+        verdict,
+      );
+      // The task is printed afterwards so the operator sees the criterion's new state
+      // and its provenance in one place. `--note` is for the terminal only: the log
+      // carries the decision, never the prose someone attached to it.
+      const note = flagValue(args, "note");
+      emit(
+        io,
+        json,
+        recorded,
+        [
+          `Recorded "${status}" for ${criterionId} on task ${recorded.task.id}, by ${verdictBy}.`,
+          ...(note === undefined ? [] : [`Note: ${note}`]),
+          "",
+          formatTask(recorded),
+        ].join("\n"),
+      );
       return EXIT_OK;
     }
 

@@ -202,7 +202,11 @@ export function createFetchTransport(
       }
 
       const body = await response.text();
-      return { status: response.status, headers: collectHeaders(response), body };
+      return {
+        status: response.status,
+        headers: collectHeaders(response),
+        body,
+      };
     },
 
     async sendStream(request: HttpRequest): Promise<HttpStreamResponse> {

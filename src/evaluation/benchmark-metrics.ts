@@ -83,7 +83,11 @@ export interface BenchmarkCaseRef {
   readonly domain: DecisionDomain;
   readonly label: EvaluationLabel;
   readonly deterministicExpectation:
-    | { readonly kind: "clear"; readonly optionId: string; readonly reasonCode: string }
+    | {
+        readonly kind: "clear";
+        readonly optionId: string;
+        readonly reasonCode: string;
+      }
     | { readonly kind: "no-applicable-rule" };
   readonly subject: ModelVerdict;
   readonly typesafe?: ModelVerdict;
@@ -96,7 +100,9 @@ export interface AccuracyMetrics {
   readonly correctCount?: number;
   readonly accuracy?: number;
   /** Confusion matrix over the label vocabulary of the evaluated slice. */
-  readonly confusion?: Readonly<Record<string, Readonly<Record<string, number>>>>;
+  readonly confusion?: Readonly<
+    Record<string, Readonly<Record<string, number>>>
+  >;
 }
 
 /**
@@ -181,9 +187,13 @@ export function modelVsDeterministic(
   );
 }
 
-export function modelVsTypesafe(refs: readonly BenchmarkCaseRef[]): AgreementMetrics {
-  return agreementOver(refs, (ref) => topId(ref.subject), (ref) =>
-    selectedId(ref.typesafe),
+export function modelVsTypesafe(
+  refs: readonly BenchmarkCaseRef[],
+): AgreementMetrics {
+  return agreementOver(
+    refs,
+    (ref) => topId(ref.subject),
+    (ref) => selectedId(ref.typesafe),
   );
 }
 
@@ -281,7 +291,9 @@ export function calibrationOver(
   if (scored.length === 0) {
     return { scoredCount: 0, reliability: [] };
   }
-  const brier = mean(scored.map(({ confidence, correct }) => (confidence - correct) ** 2));
+  const brier = mean(
+    scored.map(({ confidence, correct }) => (confidence - correct) ** 2),
+  );
   const reliability: ReliabilityBucket[] = [];
   let ece = 0;
   for (let bin = 0; bin < bins; bin += 1) {
@@ -359,11 +371,13 @@ export function simulateSelectivePrediction(
       );
     });
     const acceptedWithTruth = accepted.filter(
-      (ref) => isLabeledGroundTruth(ref.label) && topId(ref.subject) !== undefined,
+      (ref) =>
+        isLabeledGroundTruth(ref.label) && topId(ref.subject) !== undefined,
     );
     const acceptedCorrect = acceptedWithTruth.filter(
       (ref) =>
-        ref.label.kind === "labeled" && ref.label.optionId === topId(ref.subject),
+        ref.label.kind === "labeled" &&
+        ref.label.optionId === topId(ref.subject),
     );
     const correctButAbstained = refs.filter((ref) => {
       const confidence = topConfidence(ref.subject);
@@ -379,7 +393,9 @@ export function simulateSelectivePrediction(
       threshold,
       handled: accepted.length,
       fallbackToTypesafe: refs.length - accepted.length,
-      abstentionRate: round((refs.length - accepted.length) / Math.max(1, refs.length)),
+      abstentionRate: round(
+        (refs.length - accepted.length) / Math.max(1, refs.length),
+      ),
       ...(acceptedWithTruth.length > 0
         ? {
             accuracyOnAccepted: round(
@@ -424,7 +440,11 @@ export interface RiskErrorBreakdown {
 export function riskErrorBreakdown(
   refs: readonly BenchmarkCaseRef[],
 ): RiskErrorBreakdown {
-  const riskyDomains = new Set(["risk-assessment", "human-escalation", "retry"]);
+  const riskyDomains = new Set([
+    "risk-assessment",
+    "human-escalation",
+    "retry",
+  ]);
   const evaluated = refs.filter(
     (ref) =>
       riskyDomains.has(ref.domain) &&
@@ -432,7 +452,12 @@ export function riskErrorBreakdown(
       ref.subject.outcome !== "failed" &&
       topId(ref.subject) !== undefined,
   );
-  const counts = { falseSafe: 0, falseEscalation: 0, falseRetry: 0, falseStop: 0 };
+  const counts = {
+    falseSafe: 0,
+    falseEscalation: 0,
+    falseRetry: 0,
+    falseStop: 0,
+  };
   for (const ref of evaluated) {
     if (ref.label.kind !== "labeled") {
       continue;
@@ -445,7 +470,10 @@ export function riskErrorBreakdown(
       continue;
     }
     if (ref.domain === "retry") {
-      if (expected === "retry" && (actual === "stop" || actual === "escalate")) {
+      if (
+        expected === "retry" &&
+        (actual === "stop" || actual === "escalate")
+      ) {
         counts.falseStop += 1;
       } else if (expected !== "retry" && actual === "retry") {
         counts.falseRetry += 1;
@@ -489,7 +517,8 @@ export function valueOverDeterministic(
   refs: readonly BenchmarkCaseRef[],
 ): ValueOverDeterministic {
   const labeled = refs.filter(
-    (ref) => isLabeledGroundTruth(ref.label) && topId(ref.subject) !== undefined,
+    (ref) =>
+      isLabeledGroundTruth(ref.label) && topId(ref.subject) !== undefined,
   );
   const gateUnavailable = labeled.filter(
     (ref) => ref.deterministicExpectation.kind === "no-applicable-rule",
@@ -500,7 +529,8 @@ export function valueOverDeterministic(
   const correctOn = (slice: readonly BenchmarkCaseRef[]): number =>
     slice.filter(
       (ref) =>
-        ref.label.kind === "labeled" && ref.label.optionId === topId(ref.subject),
+        ref.label.kind === "labeled" &&
+        ref.label.optionId === topId(ref.subject),
     ).length;
   return {
     gateUnavailable: gateUnavailable.length,

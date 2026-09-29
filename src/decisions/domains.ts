@@ -956,6 +956,29 @@ export const COMPLETION_OPTIONS: readonly DecisionOption[] = [
 
 export type CompletionAssessmentId = "complete" | "incomplete" | "uncertain";
 
+/**
+ * The shapes of deterministic evidence a completion question can carry.
+ *
+ * One closed vocabulary for facts the platform already has. Each shape describes what
+ * was *measured*, never a judgement about the work: `partial` says some criteria are
+ * not established as satisfied, which is not the same as any of them failing, and
+ * `unmeasured` says no criterion has been assessed at all — which is different again
+ * from a task that declares none. Without this, those cases reach a decision layer as
+ * one string it has to do arithmetic on (`criteria:1/3`), and "2 of 2 established"
+ * versus "1 of 3 established" are separated only by the reader's care.
+ */
+export const COMPLETION_EVIDENCE_SHAPES = [
+  "failed",
+  "none",
+  "no-criteria",
+  "unmeasured",
+  "partial",
+  "fully-satisfied",
+] as const;
+
+export type CompletionEvidenceShape =
+  (typeof COMPLETION_EVIDENCE_SHAPES)[number];
+
 export interface CompletionDecisionInput {
   readonly acceptanceCriteriaTotal: number;
   /**
@@ -966,9 +989,135 @@ export interface CompletionDecisionInput {
    * not be handed the second in place of the first.
    */
   readonly acceptanceCriteriaMet?: number;
+  /**
+   * Criteria the task declares that are **not** established as satisfied.
+   *
+   * Supplied by the caller from the record's own `acceptanceSummary`, so the fact is
+   * counted rather than derived. When it is absent the platform falls back to its own
+   * accounting — everything not established is either satisfied or still unmeasured on
+   * this path — and the fallback is stated in the fact list rather than hidden.
+   */
+  readonly acceptanceCriteriaPending?: number;
   readonly verificationChecks: number;
   readonly verificationFailures: number;
   readonly context: readonly string[];
+}
+
+/**
+ * Classifies the deterministic evidence into one shape, in a fixed precedence.
+ *
+ * The order is the platform's existing gate order and is not negotiable: a real
+ * verification failure outranks everything else, an attempt with no verification at all
+ * is reported as such before any criterion is discussed, and only then do the criteria
+ * speak. Every branch is a fact about the run; none of them judges the outcome.
+ */
+export function classifyCompletionEvidence(
+  input: Pick<
+    CompletionDecisionInput,
+    | "acceptanceCriteriaTotal"
+    | "acceptanceCriteriaMet"
+    | "verificationChecks"
+    | "verificationFailures"
+  >,
+): CompletionEvidenceShape {
+  if (input.verificationFailures > 0) {
+    return "failed";
+  }
+  if (input.verificationChecks === 0) {
+    return "none";
+  }
+  if (input.acceptanceCriteriaTotal === 0) {
+    // Nothing was declared, so nothing can be established. This is deliberately not
+    // `fully-satisfied`: `met === total` holds trivially at zero, and reading that as
+    // "all criteria met" would let an empty contract look like a satisfied one.
+    return "no-criteria";
+  }
+  if (input.acceptanceCriteriaMet === undefined) {
+    return "unmeasured";
+  }
+  return input.acceptanceCriteriaMet >= input.acceptanceCriteriaTotal
+    ? "fully-satisfied"
+    : "partial";
+}
+
+/**
+ * The reason codes that are *consistent* with one evidence shape.
+ *
+ * Membership is the whole enforcement, and it is deliberately a property of the
+ * question rather than a rule applied after an answer arrives: a code outside this set
+ * is not offered, so a decision layer that names it has its answer rejected by the
+ * existing validator and the deterministic fallback answers instead (`validate.ts`,
+ * ADR-053 — reject, never repair). That is why `criteria-met` is offered only for
+ * `fully-satisfied`: where the platform has not assessed a criterion, a claim that it
+ * is met cannot be made at all, rather than being made and then trusted.
+ *
+ * Every shape also offers `evidence-insufficient` — the general "what was recorded does
+ * not settle this" answer — so a layer is never forced into a claim the evidence does
+ * not support.
+ */
+const COMPLETION_REASON_CODES_BY_SHAPE: Readonly<
+  Record<
+    CompletionEvidenceShape,
+    readonly (typeof COMPLETION_REASON_CODES)[number][]
+  >
+> = {
+  // Never reaches a provider: the gate answers. Still a well-formed question, because
+  // the gate's own reason code must be one the question offers.
+  failed: ["verification-failed", "evidence-insufficient"],
+  none: ["no-verification-evidence", "evidence-insufficient"],
+  // Criteria are declared but none is established, one is established and others are
+  // not, or none is declared at all: one question, one answer set, no `criteria-met`.
+  "no-criteria": [
+    "criteria-unclear",
+    "verification-passed",
+    "evidence-insufficient",
+  ],
+  unmeasured: [
+    "criteria-unclear",
+    "verification-passed",
+    "evidence-insufficient",
+  ],
+  partial: ["criteria-unclear", "verification-passed", "evidence-insufficient"],
+  "fully-satisfied": [
+    "criteria-met",
+    "verification-passed",
+    "evidence-insufficient",
+  ],
+};
+
+/** The reason codes a completion question with this evidence offers. */
+export function completionReasonCodesFor(
+  shape: CompletionEvidenceShape,
+): readonly string[] {
+  return COMPLETION_REASON_CODES_BY_SHAPE[shape];
+}
+
+/**
+ * The facts a completion question carries, so the evidence shape is readable without
+ * arithmetic and `0` is never inferred from absence.
+ *
+ * `criteria:` is the pre-existing fact and keeps its exact form, including the
+ * `unmeasured` sentinel. The rest are additive: how many criteria are still not
+ * established, how many checks ran, how many failed, and which shape the whole of it is.
+ */
+function completionEvidenceFacts(
+  input: CompletionDecisionInput,
+): readonly string[] {
+  const pending =
+    input.acceptanceCriteriaPending ??
+    (input.acceptanceCriteriaMet === undefined
+      ? input.acceptanceCriteriaTotal
+      : Math.max(
+          0,
+          input.acceptanceCriteriaTotal - input.acceptanceCriteriaMet,
+        ));
+  return [
+    `criteria:${input.acceptanceCriteriaMet ?? "unmeasured"}/${input.acceptanceCriteriaTotal}`,
+    `criteria-pending:${pending}`,
+    `verification-checks:${input.verificationChecks}`,
+    `verification-failures:${input.verificationFailures}`,
+    `evidence:${classifyCompletionEvidence(input)}`,
+  ];
 }
 
 export function buildCompletionSpec(
@@ -995,12 +1144,11 @@ export function buildCompletionSpec(
     domain: "completion",
     question: "Does the recorded evidence suggest this task is complete?",
     options: COMPLETION_OPTIONS,
-    reasonCodes: COMPLETION_REASON_CODES,
-    context: [
-      ...input.context,
-      `criteria:${input.acceptanceCriteriaMet ?? "unmeasured"}/${input.acceptanceCriteriaTotal}`,
-      `verification-checks:${input.verificationChecks}`,
-    ],
+    // The offered set *is* the semantic contract: it is narrowed to the codes the
+    // recorded evidence can support, so an unsupported claim is not an answer this
+    // question can be given (see `COMPLETION_REASON_CODES_BY_SHAPE`).
+    reasonCodes: completionReasonCodesFor(classifyCompletionEvidence(input)),
+    context: [...input.context, ...completionEvidenceFacts(input)],
     defaultOptionId: "uncertain",
     allowEscalated: false,
     allowAbstained: true,
@@ -1009,24 +1157,112 @@ export function buildCompletionSpec(
   };
 }
 
-export interface CompletionDecisionResult {
-  /** An assessment only. The task state machine remains deterministic (ADR-054). */
+/**
+ * How confident a `complete` verdict must be before it is acted on.
+ *
+ * Completion is the one assessment whose answer *removes* a human from the loop: a
+ * `complete` verdict is what lets a run be reported as completed rather than as
+ * needing review, so it is the one place a low-confidence answer would do damage.
+ *
+ * The default is the conventional high/medium boundary — a layer that is not at least
+ * "highly likely" does not get to close a task — and it is overridable per project
+ * (`decision.minCompletionConfidence`), because the right number is domain-specific
+ * and belongs to whoever owns the consequences (ADR-051, ADR-054).
+ */
+export const DEFAULT_COMPLETION_CONFIDENCE_THRESHOLD = 0.8;
+
+/**
+ * Withholds a `complete` verdict that is not confident enough to be acted on.
+ *
+ * The gate only ever makes an answer more conservative, and each of its four rules is
+ * deliberate:
+ *
+ * - **Only `complete` is gated.** `incomplete` and `uncertain` both end with a human
+ *   looking at the task, so gating them would change no outcome. `complete` is the only
+ *   answer that withholds review, and therefore the only one worth gating.
+ * - **A withheld verdict becomes `uncertain`**, never `incomplete`: nothing was learned
+ *   about whether the work is finished, only that the layer is unsure. `uncertain` is
+ *   also this domain's own declared default, so the gate produces a value the rest of
+ *   the platform already understands rather than a new one.
+ * - **An unmeasured confidence is not a low one.** A verdict carrying no confidence
+ *   holds no measurement to judge, and this platform never reads absent as zero or as
+ *   one (ADR-035) — so absence is recorded as absence and the gate does not fire on it.
+ *   That stays honest because nothing here closes a task: a run still ends in `review`
+ *   and a human still decides (ADR-054).
+ * - **A gate cannot grant anything.** It cannot raise a confidence, alter a reason code,
+ *   or produce an option the caller did not offer. A verdict at or above the threshold
+ *   passes through untouched.
+ */
+export function gateCompletionAssessment(
+  assessment: CompletionAssessmentId,
+  confidence: number | undefined,
+  threshold: number,
+): {
   readonly assessment: CompletionAssessmentId;
+  readonly confidenceGated: boolean;
+} {
+  if (assessment !== "complete" || confidence === undefined) {
+    return { assessment, confidenceGated: false };
+  }
+  return confidence >= threshold
+    ? { assessment, confidenceGated: false }
+    : { assessment: "uncertain", confidenceGated: true };
+}
+
+export interface CompletionDecisionResult {
+  /**
+   * The assessment the platform may act on: `complete` only when the layer was
+   * confident enough for it to count, and the gated value otherwise.
+   *
+   * An assessment only. The task state machine remains deterministic (ADR-054).
+   */
+  readonly assessment: CompletionAssessmentId;
+  /**
+   * What the decision layer actually answered, before the confidence policy.
+   *
+   * Kept beside `assessment` rather than folded into it, the same way
+   * `interpretRiskAssessment` keeps `assessedRisk` beside `effectiveRisk`: a reader can
+   * tell "the layer said complete" and "nothing acted on that" apart.
+   */
+  readonly reportedAssessment: CompletionAssessmentId;
+  /** True when a `complete` verdict was withheld because its confidence was too low. */
+  readonly confidenceGated: boolean;
+  /** The confidence the layer reported, when it reported one. */
+  readonly confidence?: number;
   readonly reasonCode?: string;
   readonly meta: DecisionOutcomeMeta;
 }
 
+/**
+ * Reads a completion answer through the confidence policy.
+ *
+ * `minConfidence` is a parameter rather than a constant because the threshold is
+ * policy: the caller (the coordinator, from project configuration) owns the number, and
+ * the domain owns what it means. Omitting it uses the documented default above, so a
+ * caller cannot accidentally switch the gate off by not mentioning it.
+ */
 export function interpretCompletion(
   outcome: DomainDecisionOutcome,
   meta: DecisionOutcomeMeta,
+  minConfidence?: number,
 ): CompletionDecisionResult {
-  const assessment = COMPLETION_OPTIONS.some(
+  const reported = COMPLETION_OPTIONS.some(
     (option) => option.id === outcome.selectedOptionId,
   )
     ? (outcome.selectedOptionId as CompletionAssessmentId)
     : "uncertain";
+  const gated = gateCompletionAssessment(
+    reported,
+    outcome.confidence,
+    minConfidence ?? DEFAULT_COMPLETION_CONFIDENCE_THRESHOLD,
+  );
   return {
-    assessment,
+    assessment: gated.assessment,
+    reportedAssessment: reported,
+    confidenceGated: gated.confidenceGated,
+    ...(outcome.confidence === undefined
+      ? {}
+      : { confidence: outcome.confidence }),
     ...(outcome.reasonCode === undefined
       ? {}
       : { reasonCode: outcome.reasonCode }),
@@ -1305,11 +1541,13 @@ export function buildSkillSelectionSpec(
   }
   return {
     domain: "skill-selection",
-    question: "Which available skill, if any, is relevant to the current state?",
+    question:
+      "Which available skill, if any, is relevant to the current state?",
     options: [
-      ...input.skillIds.map(
-        (id): DecisionOption => ({ id, label: `registered skill: ${id}` }),
-      ),
+      ...input.skillIds.map((id): DecisionOption => ({
+        id,
+        label: `registered skill: ${id}`,
+      })),
       {
         id: SKILL_SELECTION_NO_SKILL,
         label: "No registered skill matches; proceed without one",
@@ -1340,7 +1578,9 @@ export function interpretSkillSelection(
   if (selected === undefined || selected === SKILL_SELECTION_NO_SKILL) {
     return {
       verdict: "no-skill",
-      ...(outcome.reasonCode === undefined ? {} : { reasonCode: outcome.reasonCode }),
+      ...(outcome.reasonCode === undefined
+        ? {}
+        : { reasonCode: outcome.reasonCode }),
       meta,
     };
   }
@@ -1349,7 +1589,9 @@ export function interpretSkillSelection(
   return {
     verdict: "select-skill",
     skillId: selected,
-    ...(outcome.reasonCode === undefined ? {} : { reasonCode: outcome.reasonCode }),
+    ...(outcome.reasonCode === undefined
+      ? {}
+      : { reasonCode: outcome.reasonCode }),
     meta,
   };
 }
@@ -1428,8 +1670,12 @@ export function interpretContextSelection(
         : outcome.selectedOptionId === "compress"
           ? "compress"
           : "drop",
-    ...(outcome.reasonCode === undefined ? {} : { reasonCode: outcome.reasonCode }),
-    ...(outcome.confidence === undefined ? {} : { confidence: outcome.confidence }),
+    ...(outcome.reasonCode === undefined
+      ? {}
+      : { reasonCode: outcome.reasonCode }),
+    ...(outcome.confidence === undefined
+      ? {}
+      : { confidence: outcome.confidence }),
     meta,
   };
 }

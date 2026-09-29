@@ -185,7 +185,8 @@ describe("ai task approve", () => {
     const taskId = await highRiskTask(env);
 
     const suspended = await cli(["task", "run", taskId], env);
-    expect(suspended.code).toBe(1);
+    // A suspension waiting on a human is the dedicated lifecycle code 5, not 1.
+    expect(suspended.code).toBe(5);
     expect(suspended.cap.outText()).toContain("awaiting-approval");
     expect(suspended.cap.outText()).toContain(`ai task approve ${taskId}`);
 

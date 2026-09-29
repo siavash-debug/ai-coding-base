@@ -87,6 +87,8 @@ export interface SessionLlmFailure {
 
 export interface SessionTestRun {
   readonly suite: string;
+  /** A named check within the suite, when the runtime reported one. */
+  readonly check?: string;
   readonly passed: number;
   readonly failed: number;
   readonly durationMs: number;
@@ -321,13 +323,17 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
       await deps.recorder.emit({
         ...base,
         type: "TestStarted",
-        payload: { suite: run.suite },
+        payload: {
+          suite: run.suite,
+          ...(run.check === undefined ? {} : { check: run.check }),
+        },
       });
       await deps.recorder.emit({
         ...base,
         type: "TestCompleted",
         payload: {
           suite: run.suite,
+          ...(run.check === undefined ? {} : { check: run.check }),
           passed: run.passed,
           failed: run.failed,
           durationMs: run.durationMs,

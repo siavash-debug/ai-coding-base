@@ -23,7 +23,9 @@ import type { Environment } from "../../src/ports/environment.js";
 import { type Clock, createFixedClock } from "../../src/core/clock.js";
 import type { HttpTransport } from "../../src/ports/http-transport.js";
 import type { LlmProvider } from "../../src/ports/llm-provider.js";
+import type { AgentRunner } from "../../src/ports/agent-runner.js";
 import type { DecisionProvider } from "../../src/decisions/provider.js";
+import type { DecisionConfig } from "../../src/adapters/config/project-config.js";
 import { createFakeTransport } from "./llm.js";
 import { projectId, workspaceId } from "../../src/core/ids.js";
 import type { BoundaryScope } from "../../src/ports/operation.js";
@@ -163,6 +165,7 @@ export interface SandboxFixtureOptions {
   readonly transport?: HttpTransport;
   readonly hostEnvironment?: Readonly<Record<string, string>>;
   readonly maxReadBytes?: number;
+  readonly maxWriteBytes?: number;
   /** Forces the platform the boundary believes it is running on. */
   readonly platform?: string;
 }
@@ -215,6 +218,9 @@ export async function createSandboxFixture(
     ...(options.maxReadBytes === undefined
       ? {}
       : { maxReadBytes: options.maxReadBytes }),
+    ...(options.maxWriteBytes === undefined
+      ? {}
+      : { maxWriteBytes: options.maxWriteBytes }),
     ...(options.platform === undefined ? {} : { platform: options.platform }),
   });
 
@@ -285,8 +291,19 @@ export interface EnforcementFixtureOptions {
    * platform's default.
    */
   readonly decisionProvider?: DecisionProvider;
+  /**
+   * Decision-layer limits written to the project config, so a test can pin a tight
+   * `maxDecisionsPerTask` and observe what the budget actually bounds.
+   */
+  readonly decision?: DecisionConfig;
   /** Overrides the LLM provider, for runs that must fail in a chosen way. */
   readonly provider?: LlmProvider;
+  /**
+   * Overrides the configured agent runner so a test can emit an exact verification
+   * step — a chosen suite with chosen pass/fail counts — and observe what the runtime
+   * does with that evidence.
+   */
+  readonly runner?: AgentRunner;
   readonly tasks?: readonly {
     readonly title: string;
     readonly riskLevel?: "low" | "medium" | "high" | "critical";
@@ -317,6 +334,7 @@ export async function createEnforcementFixture(
     slug: "enforcement-fixture",
     clock,
     policy,
+    ...(options.decision === undefined ? {} : { decision: options.decision }),
   });
   const runtime = await openRuntime({
     projectRoot: root,
@@ -330,6 +348,7 @@ export async function createEnforcementFixture(
       ? {}
       : { decisionProvider: options.decisionProvider }),
     ...(options.provider === undefined ? {} : { provider: options.provider }),
+    ...(options.runner === undefined ? {} : { runner: options.runner }),
   });
 
   const [firstTask] = options.tasks ?? [{ title: "Enforce the boundary" }];

@@ -63,11 +63,20 @@ export interface LocalFsBoundaryOptions {
   readonly deniedPatterns: readonly string[];
   readonly maxReadBytes?: number;
   readonly maxListEntries?: number;
+  /**
+   * Largest single write this boundary will perform.
+   *
+   * Reads truncate when they exceed their cap; a write must not, because a
+   * truncated file is a corrupted file. An over-cap write is refused *before*
+   * anything is written, so a large proposal cannot produce a partial file.
+   */
+  readonly maxWriteBytes?: number;
   readonly platform?: string;
 }
 
 export const DEFAULT_MAX_READ_BYTES = 262_144;
 export const DEFAULT_MAX_LIST_ENTRIES = 1_000;
+export const DEFAULT_MAX_WRITE_BYTES = 1_048_576;
 
 export interface LocalFsBoundary {
   readonly id: string;
@@ -108,6 +117,7 @@ export function createLocalFsBoundary(
   const platform = options.platform ?? process.platform;
   const maxReadBytes = options.maxReadBytes ?? DEFAULT_MAX_READ_BYTES;
   const maxListEntries = options.maxListEntries ?? DEFAULT_MAX_LIST_ENTRIES;
+  const maxWriteBytes = options.maxWriteBytes ?? DEFAULT_MAX_WRITE_BYTES;
   /** Resolved lazily and cached: one `realpath` per root per boundary instance. */
   const realRoots = new Map<string, string | undefined>();
 
@@ -349,6 +359,18 @@ export function createLocalFsBoundary(
       const admitted = await admitRef(ref, "write");
       if (admitted !== undefined) {
         return { ok: false, refusal: admitted };
+      }
+      const bytes = Buffer.byteLength(content, "utf8");
+      if (bytes > maxWriteBytes) {
+        // Refused before `writeFile`: an over-cap write is a boundary refusal, not
+        // a truncated file. Recorded by the gateway as a violation like any other.
+        return {
+          ok: false,
+          refusal: refusal(
+            "WRITE_TOO_LARGE",
+            `"${ref}" is ${bytes} bytes, over the ${maxWriteBytes}-byte write limit`,
+          ),
+        };
       }
       const absolute = resolveRef(scope.workspaceRoot, ref);
       try {

@@ -76,14 +76,17 @@ function labeledRef(overrides: {
       ...(overrides.outcome === "failed"
         ? {}
         : { selectedOptionId: overrides.subjectOption ?? "a" }),
-      ...(overrides.confidence === undefined && overrides.distribution === undefined
+      ...(overrides.confidence === undefined &&
+      overrides.distribution === undefined
         ? {}
         : {
             confidence:
               overrides.confidence ??
               Object.values(overrides.distribution ?? { a: 1 })[0],
           }),
-      ...(overrides.distribution === undefined ? {} : { distribution: overrides.distribution }),
+      ...(overrides.distribution === undefined
+        ? {}
+        : { distribution: overrides.distribution }),
       latencyMs: 10,
     },
     ...(overrides.typesafeOption === undefined
@@ -170,7 +173,9 @@ describe("label separation", () => {
   });
 
   it("includes the test-derived slice with honest provenance", () => {
-    const testDerived = BENCHMARK_CASES.filter((c) => c.source === "test-derived");
+    const testDerived = BENCHMARK_CASES.filter(
+      (c) => c.source === "test-derived",
+    );
     expect(testDerived.length).toBeGreaterThanOrEqual(80);
     for (const c of testDerived) {
       // Test-derived gate labels carry DETERMINISTIC_POLICY authority with the
@@ -184,8 +189,12 @@ describe("label separation", () => {
   });
 
   it("groundTruthStatusOf separates verified from unavailable", () => {
-    const labeled = BENCHMARK_CASES.find((c) => c.evaluationLabel.kind === "labeled");
-    const unlabeled = BENCHMARK_CASES.find((c) => c.evaluationLabel.kind === "unlabeled");
+    const labeled = BENCHMARK_CASES.find(
+      (c) => c.evaluationLabel.kind === "labeled",
+    );
+    const unlabeled = BENCHMARK_CASES.find(
+      (c) => c.evaluationLabel.kind === "unlabeled",
+    );
     expect(labeled && groundTruthStatusOf(labeled)).toBe("verified");
     expect(unlabeled && groundTruthStatusOf(unlabeled)).toBe("unavailable");
   });
@@ -193,11 +202,9 @@ describe("label separation", () => {
   it("labeled rows always declare an authority; grids are unlabeled", () => {
     for (const c of BENCHMARK_CASES) {
       if (c.evaluationLabel.kind === "labeled") {
-        expect([
-          "GROUND_TRUTH",
-          "DETERMINISTIC_POLICY",
-          "TYPESAFE",
-        ]).toContain(c.evaluationLabel.authority);
+        expect(["GROUND_TRUTH", "DETERMINISTIC_POLICY", "TYPESAFE"]).toContain(
+          c.evaluationLabel.authority,
+        );
       }
     }
   });
@@ -272,7 +279,13 @@ describe("dataset accounting", () => {
     expect(accounting.totalCases).toBeGreaterThanOrEqual(300);
     expect(accounting.labeledCases).toBeGreaterThanOrEqual(150);
     // All three sources present and accounted for.
-    const sources = new Set(accounting.domains.flatMap((d) => Object.entries(d.sourceDistribution).filter(([, n]) => n > 0).map(([k]) => k)));
+    const sources = new Set(
+      accounting.domains.flatMap((d) =>
+        Object.entries(d.sourceDistribution)
+          .filter(([, n]) => n > 0)
+          .map(([k]) => k),
+      ),
+    );
     expect(sources.has("derived-production-spec")).toBe(true);
     expect(sources.has("test-derived")).toBe(true);
   });
@@ -306,7 +319,12 @@ describe("metric correctness", () => {
 
   it("agreement with the deterministic gate treats gate-unavailable as non-comparable", () => {
     const refs = [
-      labeledRef({ labelOption: "a", subjectOption: "a", gate: "clear", gateOption: "a" }),
+      labeledRef({
+        labelOption: "a",
+        subjectOption: "a",
+        gate: "clear",
+        gateOption: "a",
+      }),
       labeledRef({ labelOption: "a", subjectOption: "a", gate: "none" }),
     ];
     const vsGate = modelVsDeterministic(refs);
@@ -511,7 +529,9 @@ describe("typeSafe eligibility and artifact guard", () => {
       assertArtifactClean({ schemaVersion: 1, ok: { nested: [1, 2] } }),
     ).not.toThrow();
     expect(() => assertArtifactClean({ prompt: "leak" })).toThrow();
-    expect(() => assertArtifactClean({ a: { authorization: "Bearer x" } })).toThrow();
+    expect(() =>
+      assertArtifactClean({ a: { authorization: "Bearer x" } }),
+    ).toThrow();
   });
 
   it("no benchmark case embeds credential-shaped strings", () => {
@@ -525,9 +545,10 @@ describe("typeSafe eligibility and artifact guard", () => {
         ...c.state.context,
         ...c.options.map((option) => option.label),
       ].join("\n");
-      expect(SECRET_PATTERN.test(text), `${c.caseId} looks credential-shaped`).toBe(
-        false,
-      );
+      expect(
+        SECRET_PATTERN.test(text),
+        `${c.caseId} looks credential-shaped`,
+      ).toBe(false);
     }
   });
 });
@@ -542,28 +563,44 @@ describe("dataset fidelity to production builders", () => {
       byDomain.set(c.domain, bucket);
     }
     expect(
-      byDomain.get("completion")?.every(
-        (c) => c.state.question === "Does the recorded evidence suggest this task is complete?",
-      ),
+      byDomain
+        .get("completion")
+        ?.every(
+          (c) =>
+            c.state.question ===
+            "Does the recorded evidence suggest this task is complete?",
+        ),
     ).toBe(true);
     expect(
-      byDomain.get("tool-selection")?.every(
-        (c) => c.state.question === "Which allowed tool should the runtime use for this task?",
-      ),
+      byDomain
+        .get("tool-selection")
+        ?.every(
+          (c) =>
+            c.state.question ===
+            "Which allowed tool should the runtime use for this task?",
+        ),
     ).toBe(true);
     expect(
-      byDomain.get("relevance")?.every(
-        (c) => c.state.question === "Is the bounded candidate set relevant to this task?",
-      ),
+      byDomain
+        .get("relevance")
+        ?.every(
+          (c) =>
+            c.state.question ===
+            "Is the bounded candidate set relevant to this task?",
+        ),
     ).toBe(true);
   });
 
   it("risk baselines in cases match the policy's own table", () => {
-    const riskCases = BENCHMARK_CASES.filter((c) => c.domain === "risk-assessment");
+    const riskCases = BENCHMARK_CASES.filter(
+      (c) => c.domain === "risk-assessment",
+    );
     expect(riskCases.length).toBeGreaterThan(0);
     for (const c of riskCases) {
       // The question always carries the baseline the builder derived from policy.
-      expect(c.state.question).toMatch(/beyond its "(low|medium|high|critical)" baseline\?$/);
+      expect(c.state.question).toMatch(
+        /beyond its "(low|medium|high|critical)" baseline\?$/,
+      );
     }
     // Every operation named in an op: context entry is a real policy operation.
     for (const c of riskCases) {

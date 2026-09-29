@@ -44,6 +44,8 @@ export const POLICY_REASON_CODES = [
   "APPROVAL_CONSUMED",
   /** The grant belongs to another project, workspace, task or capability. */
   "APPROVAL_SCOPE_MISMATCH",
+  /** A write exceeded the boundary's per-operation size cap. */
+  "WRITE_TOO_LARGE",
   /** The request, scope or envelope was malformed; nothing was evaluated. */
   "MALFORMED_REQUEST",
   /** The caller's scope is not the scope this boundary is bound to. */
@@ -77,6 +79,7 @@ export const REASON_DESCRIPTIONS: Readonly<Record<PolicyReasonCode, string>> = {
   APPROVAL_EXPIRED: "the approval has expired",
   APPROVAL_CONSUMED: "the approval was already consumed",
   APPROVAL_SCOPE_MISMATCH: "the approval belongs to another scope",
+  WRITE_TOO_LARGE: "the write exceeds the permitted size",
   MALFORMED_REQUEST: "the request was malformed",
   INVALID_SCOPE: "the request is outside this boundary's scope",
   OPERATION_FAILED: "the operation failed after being authorized",

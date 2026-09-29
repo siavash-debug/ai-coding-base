@@ -25,7 +25,12 @@ import type { LlmFailureKind } from "../ports/llm-provider.js";
 import type { LlmCallRecord } from "../observability/metrics.js";
 import { computeTaskMetrics } from "../observability/metrics.js";
 import type { AgentSession } from "../sessions/agent-session.js";
-import type { Task } from "../tasks/task.js";
+import {
+  type Task,
+  type VerificationSuiteEvidence,
+  acceptanceSummary,
+  measuredAcceptanceCriteriaMet,
+} from "../tasks/task.js";
 import type {
   AgentAttempt,
   AgentDecisionPort,
@@ -38,6 +43,7 @@ import {
 } from "../ports/agent-runner.js";
 import type { ContextEngine } from "../ports/context-engine.js";
 import type { StoredTask } from "../ports/task-repository.js";
+import type { ProjectScope } from "../ports/scope.js";
 import type { Workspace } from "../workspaces/workspace.js";
 import {
   type ApprovalLedger,
@@ -173,6 +179,34 @@ export interface RunTaskDeps {
 
 export interface RunTask {
   run(stored: StoredTask): Promise<RunTaskResult>;
+  plan(stored: StoredTask): Promise<RunPlan>;
+}
+
+/**
+ * What a `--dry-run` can establish without executing.
+ *
+ * Deliberately *not* a `RunTaskResult`: no outcome is claimed, because no work was
+ * attempted, and there is no session, because none was opened. It reports only what
+ * the run validates before its first side effect — the resolved task, the
+ * deterministic risk gate, the approval state already on record, and the capability
+ * envelope the attempt would be offered. Every field is read-only or pure.
+ */
+export interface RunPlan {
+  readonly taskId: Task["id"];
+  readonly workspaceId: Task["workspaceId"];
+  readonly taskStatus: Task["status"];
+  readonly riskLevel: RiskLevel;
+  readonly resuming: boolean;
+  /** The deterministic task-risk gate: does this risk level need a human first? */
+  readonly requiresHumanApproval: boolean;
+  /** A grant already recorded for this task, if any (read, never consumed). */
+  readonly usableGrantRequestId?: string;
+  /** A request already awaiting a human, if any (read, never reissued). */
+  readonly pendingApprovalRequestId?: string;
+  readonly policyId: string;
+  readonly capabilityEnvelope: readonly string[];
+  /** The ordered work the attempt would perform, for reporting only. */
+  readonly steps: readonly string[];
 }
 
 /**
@@ -272,48 +306,97 @@ function describeFailure(
   return `provider failure: ${failureKind}${status} after ${attempts} attempt(s)`;
 }
 
+/**
+ * The validation prefix both `run` and `plan` share, with no side effects.
+ *
+ * A stale projection, a foreign workspace, a task in the wrong state, or an
+ * `in_progress` task with nothing to resume are refusals that must happen before
+ * planning *or* execution. Nothing here writes an event, opens a session or asks a
+ * decision.
+ */
+async function resolveAttempt(
+  deps: RunTaskDeps,
+  stored: StoredTask,
+): Promise<{
+  readonly current: StoredTask;
+  readonly task: Task;
+  readonly scope: ProjectScope;
+  readonly resuming: boolean;
+}> {
+  const taskId = stored.task.id;
+  const scopeForRead = {
+    projectId: stored.task.projectId,
+    workspaceId: stored.task.workspaceId,
+  };
+
+  // Read the current record *before* doing anything observable. A stale
+  // projection is a real possibility — a task suspended an hour ago, an
+  // approval granted since — and a run that discovered this only at its first
+  // lifecycle write would already have spent a real model call. Refusing up
+  // front keeps optimistic concurrency from costing money.
+  const latest = await deps.tasks.load(scopeForRead, taskId);
+  if (latest.version !== stored.version) {
+    throw new DomainError(
+      "CONFLICT",
+      `task "${taskId}" is at version ${latest.version}, but this attempt was handed version ${stored.version}; re-read the task and retry`,
+      {
+        field: "task.version",
+        currentVersion: latest.version,
+        givenVersion: stored.version,
+      },
+    );
+  }
+
+  const task = latest.task;
+  if (task.workspaceId !== deps.workspace.id) {
+    throw new DomainError(
+      "FORBIDDEN",
+      `task "${task.id}" belongs to workspace "${task.workspaceId}", but this runtime runs workspace "${deps.workspace.id}"`,
+      { field: "task.workspaceId" },
+    );
+  }
+
+  const scope = {
+    projectId: task.projectId,
+    workspaceId: task.workspaceId,
+  };
+  const resuming = task.status === "in_progress";
+  if (!resuming && task.status !== "created") {
+    throw new DomainError(
+      "TRANSITION",
+      `task "${task.id}" is "${task.status}"; only a "created" task or an approval-suspended "in_progress" task can be run`,
+      { field: "task.status", status: task.status },
+    );
+  }
+  if (resuming) {
+    // Resuming is only legitimate for work that was suspended by an approval
+    // request. Anything else in_progress is either crashed or mid-flight, and
+    // silently restarting it would fabricate history.
+    const states = await deps.ledger.forTask(scope, task.id);
+    const actionable = states.some(
+      (state) => state.status === "pending" || state.status === "granted",
+    );
+    if (!actionable) {
+      throw new DomainError(
+        "INVARIANT",
+        `task "${task.id}" is in_progress with no pending or granted approval; refusing to resume work that was not suspended`,
+        { field: "task.status" },
+      );
+    }
+  }
+  return { current: latest, task, scope, resuming };
+}
+
 export function createRunTask(deps: RunTaskDeps): RunTask {
   return {
     async run(stored): Promise<RunTaskResult> {
-      const taskId = stored.task.id;
-      const scopeForRead = {
-        projectId: stored.task.projectId,
-        workspaceId: stored.task.workspaceId,
-      };
-
-      // Read the current record *before* doing anything observable. A stale
-      // projection is a real possibility — a task suspended an hour ago, an
-      // approval granted since — and a run that discovered this only at its first
-      // lifecycle write would already have spent a real model call. Refusing up
-      // front keeps optimistic concurrency from costing money.
-      const latest = await deps.tasks.load(scopeForRead, taskId);
-      if (latest.version !== stored.version) {
-        throw new DomainError(
-          "CONFLICT",
-          `task "${taskId}" is at version ${latest.version}, but this attempt was handed version ${stored.version}; re-read the task and retry`,
-          {
-            field: "task.version",
-            currentVersion: latest.version,
-            givenVersion: stored.version,
-          },
-        );
-      }
-
-      let current = latest;
-      const task = current.task;
-      if (task.workspaceId !== deps.workspace.id) {
-        throw new DomainError(
-          "FORBIDDEN",
-          `task "${task.id}" belongs to workspace "${task.workspaceId}", but this runtime runs workspace "${deps.workspace.id}"`,
-          { field: "task.workspaceId" },
-        );
-      }
-
-      const scope = {
-        projectId: task.projectId,
-        workspaceId: task.workspaceId,
-      };
-      const resuming = task.status === "in_progress";
+      const {
+        current: loadedCurrent,
+        task,
+        scope,
+        resuming,
+      } = await resolveAttempt(deps, stored);
+      let current = loadedCurrent;
       /**
        * True once this attempt has continued a previously suspended one. Set by
        * consuming a grant, which can only happen on a later attempt — a first
@@ -321,29 +404,6 @@ export function createRunTask(deps: RunTaskDeps): RunTask {
        * that never left `created`.
        */
       let resumedRun = resuming;
-      if (!resuming && task.status !== "created") {
-        throw new DomainError(
-          "TRANSITION",
-          `task "${task.id}" is "${task.status}"; only a "created" task or an approval-suspended "in_progress" task can be run`,
-          { field: "task.status", status: task.status },
-        );
-      }
-      if (resuming) {
-        // Resuming is only legitimate for work that was suspended by an approval
-        // request. Anything else in_progress is either crashed or mid-flight, and
-        // silently restarting it would fabricate history.
-        const states = await deps.ledger.forTask(scope, task.id);
-        const actionable = states.some(
-          (state) => state.status === "pending" || state.status === "granted",
-        );
-        if (!actionable) {
-          throw new DomainError(
-            "INVARIANT",
-            `task "${task.id}" is in_progress with no pending or granted approval; refusing to resume work that was not suspended`,
-            { field: "task.status" },
-          );
-        }
-      }
 
       const messages: string[] = [];
       if (resuming) {
@@ -698,6 +758,12 @@ export function createRunTask(deps: RunTaskDeps): RunTask {
       let verificationFailure: string | undefined;
       let verificationChecks = 0;
       let verificationFailures = 0;
+      /**
+       * Per-suite verification outcomes this attempt produced. They are the only
+       * evidence acceptance criteria may be assessed from, and only for criteria the
+       * task explicitly bound to a suite (`assessAcceptanceCriteria`).
+       */
+      const suiteEvidence: VerificationSuiteEvidence[] = [];
       let providerFailure:
         | {
             failureKind: LlmFailureKind;
@@ -976,16 +1042,26 @@ export function createRunTask(deps: RunTaskDeps): RunTask {
           }
           session = await deps.sessions.recordTestRun(active(), {
             suite: step.suite,
+            ...(step.check === undefined ? {} : { check: step.check }),
             passed: step.passed,
             failed: step.failed,
             durationMs: step.durationMs,
           });
           verificationChecks += step.passed + step.failed;
           verificationFailures += step.failed;
+          suiteEvidence.push({
+            suite: step.suite,
+            ...(step.check === undefined ? {} : { check: step.check }),
+            passed: step.passed,
+            failed: step.failed,
+          });
           if (step.failed > 0) {
             verificationFailure =
-              `verification suite "${step.suite}" reported ` +
-              `${step.failed} failing check(s)`;
+              step.check === undefined
+                ? `verification suite "${step.suite}" reported ` +
+                  `${step.failed} failing check(s)`
+                : `verification check "${step.check}" in suite "${step.suite}" ` +
+                  `reported ${step.failed} failing check(s)`;
           }
         }
 
@@ -1102,6 +1178,22 @@ export function createRunTask(deps: RunTaskDeps): RunTask {
         };
       }
 
+      // Assess the criteria this run can actually decide. Only a `pending` criterion
+      // the task explicitly bound to a verification suite is assessed, and only from
+      // that suite's recorded outcome: a passing check is never promoted into an
+      // arbitrary criterion. Everything else stays `pending`, and the assessment is
+      // recorded event-first so the task record is reproducible from the log.
+      const beforeAssessment = acceptanceSummary(current.task);
+      current = await deps.tasks.assessAcceptance(current, suiteEvidence);
+      const afterAssessment = acceptanceSummary(current.task);
+      if (afterAssessment.pending !== beforeAssessment.pending) {
+        messages.push(
+          `acceptance evidence: ${afterAssessment.met} met, ` +
+            `${afterAssessment.notMet} not-met, ` +
+            `${afterAssessment.pending} still unmeasured`,
+        );
+      }
+
       // The work is finished; verification decides whether it passed.
       current = await deps.tasks.transition(current, "verification");
 
@@ -1142,8 +1234,21 @@ export function createRunTask(deps: RunTaskDeps): RunTask {
        * context to the human's decision. Nothing below depends on this answer
        * (ADR-054).
        */
+      //
+      // Criterion-level evidence is reported only when it exists. The runtime never
+      // infers a criterion from a passing check: `measuredAcceptanceCriteriaMet`
+      // returns a count while any criterion has been assessed, and `undefined` while
+      // all of them are still pending, so "not measured" is never sent as "zero met".
+      // The pending count is counted from the record rather than derived, so a criterion
+      // that stayed unmeasured is reported as unmeasured and never absorbed into a
+      // remainder (`decisions/domains.ts`, `CompletionDecisionInput`).
+      const acceptanceCriteriaMet = measuredAcceptanceCriteriaMet(current.task);
       const completion = await coordinator.assessCompletion({
         acceptanceCriteriaTotal: current.task.acceptanceCriteria.length,
+        ...(acceptanceCriteriaMet === undefined
+          ? {}
+          : { acceptanceCriteriaMet }),
+        acceptanceCriteriaPending: acceptanceSummary(current.task).pending,
         verificationChecks,
         verificationFailures,
       });
@@ -1154,10 +1259,25 @@ export function createRunTask(deps: RunTaskDeps): RunTask {
             ? ")"
             : `, ${completion.reasonCode})`),
       );
+      if (completion.confidenceGated) {
+        // The verdict was withheld rather than overruled: the layer did answer
+        // `complete`, and that answer is recorded. What the platform refuses to do is
+        // act on it without a human seeing it.
+        messages.push(
+          `the layer answered "${completion.reportedAssessment}" at confidence ` +
+            `${completion.confidence}, below the configured minimum; the verdict is ` +
+            `withheld and a human decides`,
+        );
+      }
       let escalationRecommendation: EscalationRecommendationId | undefined;
       if (completion.assessment !== "complete") {
         const escalation = await coordinator.recommendEscalation({
-          facts: [`completion:${completion.assessment}`],
+          facts: [
+            `completion:${completion.assessment}`,
+            ...(completion.confidenceGated
+              ? ["completion-confidence-below-minimum"]
+              : []),
+          ],
           securityRefusal: false,
         });
         escalationRecommendation = escalation.recommendation;
@@ -1184,6 +1304,44 @@ export function createRunTask(deps: RunTaskDeps): RunTask {
           ? {}
           : { escalation: escalationRecommendation }),
         retriesSpent,
+      };
+    },
+
+    /**
+     * A dry run: validate and plan, then stop.
+     *
+     * The boundary is the first side effect of a real attempt — the
+     * `deps.decisions.record(...)` of the task-risk gate. This method never reaches
+     * it: no event is written, no session is opened, no decision is asked, no
+     * provider or agent call is made, and no approval is consumed, requested or
+     * granted. The deterministic risk gate and the existing ledger are *read*, never
+     * acted on, so what it reports is the truth established before execution.
+     */
+    async plan(stored): Promise<RunPlan> {
+      const { task, scope, resuming } = await resolveAttempt(deps, stored);
+      const states = await deps.ledger.forTask(scope, task.id);
+      const granted = states.find((state) => state.status === "granted");
+      const pending = states.find((state) => state.status === "pending");
+      return {
+        taskId: task.id,
+        workspaceId: task.workspaceId,
+        taskStatus: task.status,
+        riskLevel: task.riskLevel,
+        resuming,
+        requiresHumanApproval: requiresHumanApproval(task.riskLevel),
+        ...(granted === undefined
+          ? {}
+          : { usableGrantRequestId: granted.requestId }),
+        ...(pending === undefined
+          ? {}
+          : { pendingApprovalRequestId: pending.requestId }),
+        policyId: deps.operations.policyId,
+        capabilityEnvelope: [...deps.operations.envelope],
+        steps: [
+          "record the task-risk decision (deterministic)",
+          "select context under the task budget",
+          "run the bounded attempt through the operation gateway",
+        ],
       };
     },
   };

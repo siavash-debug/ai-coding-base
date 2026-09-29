@@ -52,12 +52,14 @@ const CONFIG_FILES = [
  * `convaiinnovations/laya`) while *not* matching the ordinary English word
  * "replayable", which shares the letters but is not a reference to anything.
  */
-const FORBIDDEN: readonly { readonly pattern: RegExp; readonly label: string }[] =
-  [
-    { pattern: /(?<![a-zA-Z])laya/i, label: "Laya reference" },
-    { pattern: /shadow-?decision/i, label: "shadow-decision reference" },
-    { pattern: /local-model/i, label: "local-model provenance reference" },
-  ];
+const FORBIDDEN: readonly {
+  readonly pattern: RegExp;
+  readonly label: string;
+}[] = [
+  { pattern: /(?<![a-zA-Z])laya/i, label: "Laya reference" },
+  { pattern: /shadow-?decision/i, label: "shadow-decision reference" },
+  { pattern: /local-model/i, label: "local-model provenance reference" },
+];
 
 function* walkFiles(directory: string): Generator<string> {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {

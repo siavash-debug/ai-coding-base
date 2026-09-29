@@ -10,7 +10,7 @@ V2 turns this baseline into a provider-agnostic foundation for AI-assisted softw
 engineering. See `docs/architecture/V2-ARCHITECTURE.md` (RFC) and
 `docs/architecture/DECISIONS.md` (ADRs).
 
-Implemented today (Phases C–E): the pure domain, an append-only JSONL event log scoped
+Implemented today (Phases C–H): the pure domain, an append-only JSONL event log scoped
 to a project/workspace, a project-scoped `ai` CLI, event-derived token/cost/budget
 reporting, one real LLM provider adapter (OpenAI-compatible, configured per project,
 credential referenced by environment-variable name), approval grants that are scoped,
@@ -54,17 +54,38 @@ they can affect anything (an answer naming a tool or route outside the offered s
 replaced by a deterministic fallback), and everything that acts still goes through the operation
 gateway. Code answers first — no deterministic step becomes a network round-trip — and a failure,
 timeout or absent layer is recorded as a fallback with its reason rather than treated as permission.
-Budgets are enforced before the provider is called and counted from the event log.
+Budgets are enforced before the provider is called and counted from the event log. Within that, a
+question's answer vocabulary is bounded by what the question is about: the completion question carries
+a classified evidence shape and offers only the reason codes that evidence can support (ADR-061), so a
+claim the platform never measured cannot be recorded as an answer.
+
+Phase H adds the **multi-model frontier**: a single configured provider and model id became a
+**registry** of declared models — each with capabilities, modalities, a latency class, a lifecycle and
+an availability window — reachable through one or more configured providers, with a `FrontierExecutor`
+port that runs exactly one step of the chosen plan. Routing stays a pipeline rather than a model's job:
+code extracts requirements, filters eligibility and orders candidates deterministically, the decision
+layer may **reorder** them but only within a permutation of what it was offered, and the frontier
+executes. An unregistered model, a model misattributed to a provider, and a requirement nothing
+satisfies are all explicit refusals — a model is never silently substituted — and identity is always
+the requested `modelId`, so cost rates, events and traces cannot be repointed. Availability is a
+declared window judged against the injected clock (ADR-057), and the layer is recorded in ADR-058.
 
 The default provider is offline and deterministic, so the platform needs no vendor
 account, no key and no network; the decision layer defaults to `disabled`, which is a fully
 functional state. Design in full: `docs/architecture/V2-ARCHITECTURE.md`
-§34 (Phase C), §35 (Phase D), §36 (Phase E), §37 (Phase F) and §38 (Phase G).
+§34 (Phase C), §35 (Phase D), §36 (Phase E), §37 (Phase F), §38 (Phase G) and §39 (Phase H).
 
-Not implemented: engineering memory, a context cache, embeddings/semantic search, plugins,
-replay/checkpoints, multi-model routing, container/remote execution and the dashboard. The bundled
-agent runner is **simulated** — it makes real provider calls and one real, policy-checked workspace
-listing, but performs no engineering work.
+The agent runtime is selected **per project**. The default is **simulated** — it makes real provider
+calls and one real, policy-checked workspace listing, but performs no engineering work, which `ai doctor`
+reports as a warning. Configuring `agent.runner: "change-set"` selects a **bounded real coding path**:
+one model turn becomes a bounded change set whose writes and verification run through the operation
+gateway, and a task's acceptance criteria can be bound to a verification suite or a named check so their
+status is assessed from that evidence (ADR-059, ADR-060); a criterion no check can decide is established
+by a named person through an explicit, recorded verdict (ADR-062). It is one-shot — no repair loop, no
+rollback.
+
+Not implemented: a full autonomous agent loop, engineering memory, a context cache,
+embeddings/semantic search, plugins, replay/checkpoints, container/remote execution and the dashboard.
 
 ## Layout
 
@@ -73,6 +94,11 @@ listing, but performs no engineering work.
 - `src/decisions/` — decision records, risk, policy, the `DecisionProvider` port, routing, and the
   decision layer: the eight bounded domains, the decision engine, deterministic validation, the
   fallback registry.
+- `src/models/` — the frontier vocabulary and registry: capabilities, modalities, roles, lifecycle and
+  availability, eligibility, deterministic ordering and process-local health. Knowledge, not
+  authority — it offers no `select` and no `best`.
+- `src/orchestration/` — the frontier use case: requirement extraction, candidate scoring and the four
+  routing modes, bounded plan variants, and the plan → decide → execute → account pipeline.
 - `src/observability/` — events, token accounting, cost accounting, budgets, task metrics.
 - `src/context/` — context domain: candidate vocabulary, token estimation, exclusion policy,
   path/import matching, explainable scoring, budget arithmetic, configuration fingerprint.
@@ -80,22 +106,28 @@ listing, but performs no engineering work.
   reference rules, path containment arithmetic, the access policy and its pure evaluation.
 - `src/ports/` — the interfaces: event store, task repository, agent runner, LLM provider,
   HTTP transport, sleep, environment, append lock, project scope, context engine,
-  repository reader, change provider, process runner, and operation (requests, results, the sandbox
-  boundary and the gateway).
+  repository reader, change provider, process runner, the frontier execution port (one step, one model,
+  no choice) and operation (requests, results, the sandbox boundary and the gateway).
 - `src/adapters/` — the implementations, none of which know about each other: JSONL event
   store + file task repository + append lock, validated project config, deterministic and
-  OpenAI-compatible providers, retry decorator, the JEV decision provider, fetch transport, timer
-  sleep, simulated runner, read-only repository reader, git change provider, argv-only process
-  runner, and the local sandbox (filesystem, process, network and environment boundaries).
+  OpenAI-compatible providers, retry decorator, the JEV decision provider, the LLM frontier executor
+  (registry → provider → adapter, normalising and never substituting), fetch transport, timer
+  sleep, simulated and change-set runners, read-only repository reader, git change provider, argv-only
+  process runner, and the local sandbox (filesystem, process, network and environment boundaries).
 - `src/application/` — composition root, services, approval ledger, context engine pipeline
   and context service, the operation gateway, the policy dry run, the scope-bound decision
   coordinator, trace read model, task run, `ai doctor`.
 - `src/cli/` — argument parsing, rendering, commands, dispatcher, process shim.
 - `src/index.ts` — original smoke proof, unchanged (see ADR-014 on why there is no barrel yet).
+- `src/skills/` — installed-skill integrity, across two records that are kept apart: the third-party
+  installer's own working-tree hash reproduced exactly (read and reported, never redefined), and this
+  repository's canonical LF content pins, which are what the read-only check decides on. Exercised by
+  tests only; not wired into any CLI command or runtime path (ADR-064).
 - `tests/unit/` — deterministic offline Vitest tests.
 - `scripts/verify.sh` — single local verification pipeline; CI runs the same script.
 - `.github/workflows/ci.yml` — CI gate on `main`.
-- `docs/` — workspace notes.
+- `docs/` — workspace notes; `docs/architecture/RECONCILIATIONS.md` is the generated index of
+  every dated reconciliation note (`pnpm docs:reconciliations`).
 
 ## Deferred (reserved, not created)
 
@@ -103,8 +135,8 @@ listing, but performs no engineering work.
 - Python/`uv` — when a real Python workload exists.
 - Docker — when runtime parity is required.
 - Engineering memory, a context cache, embeddings/semantic search, plugins,
-  replay/checkpoints, multi-model routing and the dashboard; container/namespace execution. See the
-  V2 RFC roadmap (§33), §35.6, §36.10, §37.7 and §38.8.
+  replay/checkpoints and the dashboard; container/namespace execution. See the
+  V2 RFC roadmap (§33), §35.6, §36.10, §37.7, §38.8 and §39.8.
 
 ## Verification order
 

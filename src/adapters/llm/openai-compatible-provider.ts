@@ -208,10 +208,7 @@ function classifyContentPresence(payload: {
   if (!Array.isArray(payload.choices) || payload.choices.length === 0) {
     return "no-choices";
   }
-  if (
-    typeof payload.message !== "object" ||
-    payload.message === null
-  ) {
+  if (typeof payload.message !== "object" || payload.message === null) {
     return "reasoning-only";
   }
   const content = (payload.message as Record<string, unknown>)["content"];
@@ -710,7 +707,8 @@ export function createOpenAiCompatibleProvider(
           statusCode: response.status,
           ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
         });
-      }      let parsed: ChatCompletionPayload;
+      }
+      let parsed: ChatCompletionPayload;
       try {
         parsed = JSON.parse(response.body) as ChatCompletionPayload;
       } catch {

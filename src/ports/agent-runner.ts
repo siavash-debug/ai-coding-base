@@ -1,10 +1,7 @@
 import type { ContextBundle } from "../context/selection.js";
 import type { DecisionId } from "../core/ids.js";
 import type { AIUsage } from "../observability/usage.js";
-import type {
-  LlmContentPresence,
-  LlmFailureKind,
-} from "./llm-provider.js";
+import type { LlmContentPresence, LlmFailureKind } from "./llm-provider.js";
 import type { OperationKind } from "../decisions/risk.js";
 import type {
   DecisionAnswerSource,
@@ -37,6 +34,20 @@ import type { Workspace } from "../workspaces/workspace.js";
  */
 export const LIST_WORKSPACE_TOOL = "list-workspace-files";
 export const READ_SELECTED_FILE_TOOL = "read-selected-file";
+/**
+ * Write one workspace file. The write body travels beside the id, not in it.
+ *
+ * Declared here for the same reason the read tools are: a tool id has to mean the
+ * same thing to whoever chose it and whoever executes it. A step reported as this
+ * tool is still only a *request*: the `OperationGateway` decides whether the
+ * `fs.write` it maps to may happen (ADR-045).
+ */
+export const WRITE_FILE_TOOL = "write-workspace-file";
+/**
+ * Run the configured verification command. Maps to `process.exec` through the
+ * boundary — argv only, no shell, allowlisted, timeout- and output-bounded.
+ */
+export const RUN_TESTS_TOOL = "run-verification-command";
 
 /**
  * The deterministic tool set for one attempt.
@@ -191,10 +202,22 @@ export interface AgentToolRefusal {
   readonly approvalRequestId?: string;
 }
 
-/** One verification result reported by the runtime. */
+/**
+ * One verification result reported by the runtime.
+ *
+ * `check` is the runtime's *stable, operator-declared* identity for an individual
+ * check within `suite`, present only when the runtime ran a named check. It is never
+ * derived from output position, a timestamp or any other unstable source: the id is
+ * the same one the operator declared and the criterion bound to, so "which check
+ * produced this evidence" is answerable without parsing any test framework. A step
+ * without a `check` is a whole-suite result and is only ever criterion evidence for
+ * a criterion that bound `suite` alone.
+ */
 export interface AgentTestStep {
   readonly kind: "test";
   readonly suite: string;
+  /** Stable check identity within the suite, when the runtime ran a named check. */
+  readonly check?: string;
   readonly passed: number;
   readonly failed: number;
   readonly durationMs: number;

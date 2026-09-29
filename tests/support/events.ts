@@ -21,6 +21,10 @@ import {
 } from "../../src/observability/events.js";
 import type { TerminalAgentSessionStatus } from "../../src/sessions/agent-session.js";
 import type { TaskStatus } from "../../src/tasks/lifecycle.js";
+import type {
+  AcceptanceCriterionStatus,
+  AcceptanceVerdictStatus,
+} from "../../src/tasks/task.js";
 import type { AIUsage } from "../../src/observability/usage.js";
 
 /**
@@ -256,6 +260,39 @@ export function testCompleted(
     },
     { taskId, sessionId },
   );
+}
+
+/**
+ * One deterministic assessment of bound, `pending` criteria. The reference form is the
+ * production one: `<criterion-id>:<status>:<suite>[:<check>]`.
+ */
+export function acceptanceAssessed(
+  ctx: EventContext,
+  sequence: number,
+  taskId: TaskId,
+  input: {
+    readonly assessed: number;
+    readonly met: number;
+    readonly notMet: number;
+    readonly criteria: readonly string[];
+  },
+): EventEnvelope<"AcceptanceAssessed"> {
+  return build(ctx, sequence, "AcceptanceAssessed", input, { taskId });
+}
+
+/** One explicit human verdict on one criterion, as a transition. */
+export function acceptanceVerdictRecorded(
+  ctx: EventContext,
+  sequence: number,
+  taskId: TaskId,
+  input: {
+    readonly criterionId: string;
+    readonly from: AcceptanceCriterionStatus;
+    readonly to: AcceptanceVerdictStatus;
+    readonly verdictBy: string;
+  },
+): EventEnvelope<"AcceptanceVerdictRecorded"> {
+  return build(ctx, sequence, "AcceptanceVerdictRecorded", input, { taskId });
 }
 
 export function decisionRequested(

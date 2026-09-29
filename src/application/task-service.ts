@@ -11,9 +11,14 @@ import type { Project } from "../projects/project.js";
 import type { Workspace } from "../workspaces/workspace.js";
 import type { TaskStatus } from "../tasks/lifecycle.js";
 import {
+  type AcceptanceVerdictStatus,
   type CreateTaskInput,
+  type Task,
+  type VerificationSuiteEvidence,
   acceptanceSummary,
+  assessAcceptanceCriteria,
   createTask as createDomainTask,
+  markAcceptanceCriterion,
   transitionTask as transitionDomainTask,
 } from "../tasks/task.js";
 import type { TaskRepository, StoredTask } from "../ports/task-repository.js";
@@ -38,11 +43,30 @@ export interface CreateTaskContext {
   readonly workspace: Workspace;
 }
 
+/**
+ * One explicit human verdict on one acceptance criterion.
+ *
+ * `verdictBy` is required, not optional: a status a human establishes without a name
+ * attached is exactly the anonymous assertion this record exists to prevent. It is an
+ * identity, never a secret — the same convention `--approver` follows (ADR-037).
+ */
+export interface AcceptanceVerdictInput {
+  readonly criterionId: string;
+  readonly status: AcceptanceVerdictStatus;
+  readonly verdictBy: string;
+}
+
 export interface TaskService {
   create(
     input: CreateTaskInput,
     context: CreateTaskContext,
   ): Promise<StoredTask>;
+  /**
+   * Builds the task `create` would store, without emitting an event or writing a
+   * projection. The dry-run seam: the same domain constructor and validation,
+   * none of the persistence.
+   */
+  planCreate(input: CreateTaskInput, context: CreateTaskContext): Task;
   load(scope: ProjectScope, id: TaskId): Promise<StoredTask>;
   list(scope: ProjectScope): Promise<readonly StoredTask[]>;
   transition(
@@ -52,8 +76,46 @@ export interface TaskService {
   ): Promise<StoredTask>;
   start(stored: StoredTask): Promise<StoredTask>;
   complete(stored: StoredTask, reason?: string): Promise<StoredTask>;
+  /**
+   * Computes the record `complete` would store, without writing it. The same
+   * domain transition (so an illegal transition still refuses), no event and no
+   * save.
+   */
+  planComplete(stored: StoredTask): Task;
   fail(stored: StoredTask, reason: string): Promise<StoredTask>;
   cancel(stored: StoredTask, reason?: string): Promise<StoredTask>;
+  /**
+   * Assesses `pending`, explicitly bound acceptance criteria from the verification
+   * evidence a run produced, recording an `AcceptanceAssessed` event before the
+   * projection (ADR-023). Returns the task unchanged when nothing was assessed, so a
+   * run with no bound criteria writes nothing extra.
+   */
+  assessAcceptance(
+    stored: StoredTask,
+    evidence: readonly VerificationSuiteEvidence[],
+  ): Promise<StoredTask>;
+  /**
+   * Records an explicit human verdict on one acceptance criterion, event first.
+   *
+   * The counterpart of `assessAcceptance` for the other authority: a person deciding. It
+   * writes the same criterion field and leaves different provenance, so a reader can
+   * always tell which of the two established a status (ADR-060, ADR-062). A verdict never
+   * moves the task: the lifecycle is unchanged by it, and the task's status is read
+   * afterwards exactly as before.
+   */
+  recordAcceptanceVerdict(
+    stored: StoredTask,
+    input: AcceptanceVerdictInput,
+  ): Promise<StoredTask>;
+  /**
+   * Computes the record `recordAcceptanceVerdict` would store, without writing it. The
+   * same domain mutation — so an unknown criterion or a terminal task still refuses —
+   * with no event and no save.
+   */
+  planAcceptanceVerdict(
+    stored: StoredTask,
+    input: AcceptanceVerdictInput,
+  ): Task;
 }
 
 export interface TaskServiceDeps {
@@ -165,6 +227,15 @@ export function createTaskService(deps: TaskServiceDeps): TaskService {
       return { version, task };
     },
 
+    planCreate(input, context) {
+      return createDomainTask(input, {
+        id: toTaskId(deps.taskIds.next()),
+        project: context.project,
+        workspace: context.workspace,
+        clock: deps.clock,
+      });
+    },
+
     async load(scope, id) {
       const stored = await deps.repository.find(scope, id);
       if (stored === undefined) {
@@ -179,7 +250,105 @@ export function createTaskService(deps: TaskServiceDeps): TaskService {
     transition,
     start: (stored) => transition(stored, "planning"),
     complete: (stored, reason) => transition(stored, "completed", reason),
+    planComplete: (stored) =>
+      transitionDomainTask(stored.task, "completed", deps.clock),
     fail: (stored, reason) => transition(stored, "failed", reason),
     cancel: (stored, reason) => transition(stored, "cancelled", reason),
+
+    planAcceptanceVerdict(stored, input) {
+      return markAcceptanceCriterion(
+        stored.task,
+        input.criterionId,
+        input.status,
+        deps.clock,
+        input.verdictBy,
+      );
+    },
+
+    async recordAcceptanceVerdict(stored, input) {
+      const { task } = stored;
+      const previous = task.acceptanceCriteria.find(
+        (criterion) => criterion.id === input.criterionId,
+      );
+      // The transition the event records is read from the record *before* the mutation,
+      // so a replay of the log can reconstruct every step of a criterion's history
+      // rather than only its latest state.
+      const from = previous?.status ?? "pending";
+      const verdict = markAcceptanceCriterion(
+        task,
+        input.criterionId,
+        input.status,
+        deps.clock,
+        input.verdictBy,
+      );
+      await deps.recorder.emit({
+        type: "AcceptanceVerdictRecorded",
+        workspaceId: task.workspaceId,
+        // A human action is recorded as a human action. The identity is the operator's
+        // own name, supplied by them, and it is never derived from the environment.
+        actor: { type: "human", id: input.verdictBy },
+        taskId: task.id,
+        correlationId: taskCorrelationId(
+          task.projectId,
+          task.workspaceId,
+          task.id,
+        ),
+        payload: {
+          criterionId: input.criterionId,
+          from,
+          to: input.status,
+          verdictBy: input.verdictBy,
+        },
+      });
+      const version = await deps.repository.save(
+        { projectId: verdict.projectId, workspaceId: verdict.workspaceId },
+        verdict,
+        { expectedVersion: stored.version },
+      );
+      return { version, task: verdict };
+    },
+
+    async assessAcceptance(stored, evidence) {
+      const { task } = stored;
+      const result = assessAcceptanceCriteria(task, evidence, deps.clock);
+      if (result.assessed.length === 0) {
+        return stored;
+      }
+      const correlationId = taskCorrelationId(
+        task.projectId,
+        task.workspaceId,
+        task.id,
+      );
+      // Event first, record second (ADR-023): the criterion statuses are a projection
+      // of this event plus the suite's own `TestCompleted`, so a replay can rebuild
+      // them and a failure between the two leaves an honest, detectable disagreement.
+      await deps.recorder.emit({
+        type: "AcceptanceAssessed",
+        workspaceId: task.workspaceId,
+        actor: TASK_ACTOR,
+        taskId: task.id,
+        correlationId,
+        payload: {
+          assessed: result.assessed.length,
+          met: result.assessed.filter((entry) => entry.status === "met").length,
+          notMet: result.assessed.filter((entry) => entry.status === "not-met")
+            .length,
+          criteria: result.assessed.map(
+            (entry) =>
+              `${entry.criterionId}:${entry.status}:${entry.suite}` +
+              (entry.check === undefined ? "" : `:${entry.check}`),
+          ),
+        },
+      });
+      const version = await deps.repository.save(
+        {
+          projectId: result.task.projectId,
+          workspaceId: result.task.workspaceId,
+        },
+        result.task,
+        { expectedVersion: stored.version },
+      );
+      return { version, task: result.task };
+    },
   };
 }

@@ -9,7 +9,10 @@ import {
   stableCaseId,
 } from "./decision-benchmark.js";
 import { TEST_DERIVED_CASES } from "./decision-benchmark-test-cases.js";
-import type { DecisionDomain, DomainDecisionSpec } from "../../src/decisions/domains.js";
+import type {
+  DecisionDomain,
+  DomainDecisionSpec,
+} from "../../src/decisions/domains.js";
 import {
   ALL_OPERATIONS,
   baselineRiskForOperation,
@@ -62,10 +65,7 @@ function opts(
   return entries.map(([id, label]) => ({ id, label }));
 }
 
-function labeled(
-  optionId: string,
-  note: string,
-): EvaluationLabel {
+function labeled(optionId: string, note: string): EvaluationLabel {
   return { kind: "labeled", optionId, authority: "GROUND_TRUTH", note };
 }
 
@@ -112,62 +112,102 @@ const ROUTING_REASONS = [
 const ROUTING: readonly Row[] = [
   {
     domain: "routing",
-    question: 'Which execution route should task work at risk level "low" take?',
+    question:
+      'Which execution route should task work at risk level "low" take?',
     context: ["risk:low", "scope:read-only analysis of project documentation"],
     ranked: false,
-    options: opts(["standard", "Run the attempt as configured"], ["minimal", "Run the attempt with the smallest operation set"]),
+    options: opts(
+      ["standard", "Run the attempt as configured"],
+      ["minimal", "Run the attempt with the smallest operation set"],
+    ),
     reasonCodes: ROUTING_REASONS,
     deterministic: noRule,
-    label: labeled("standard", "read-only work fits the standard route; minimal narrows privileges for no benefit"),
+    label: labeled(
+      "standard",
+      "read-only work fits the standard route; minimal narrows privileges for no benefit",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("2-options", "low-risk", "no-conflicting-signals"),
   },
   {
     domain: "routing",
-    question: 'Which execution route should task work at risk level "low" take?',
+    question:
+      'Which execution route should task work at risk level "low" take?',
     context: ["risk:low", "scope:rename a variable in one source file"],
     ranked: false,
-    options: opts(["standard", "Run the attempt as configured"], ["minimal", "Run the attempt with the smallest operation set"]),
+    options: opts(
+      ["standard", "Run the attempt as configured"],
+      ["minimal", "Run the attempt with the smallest operation set"],
+    ),
     reasonCodes: ROUTING_REASONS,
     deterministic: noRule,
-    label: labeled("standard", "a small local edit needs only the standard route"),
+    label: labeled(
+      "standard",
+      "a small local edit needs only the standard route",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("2-options", "low-risk"),
   },
   {
     domain: "routing",
-    question: 'Which execution route should task work at risk level "high" take?',
-    context: ["risk:high", "scope:force-push rewritten history to the shared main branch"],
+    question:
+      'Which execution route should task work at risk level "high" take?',
+    context: [
+      "risk:high",
+      "scope:force-push rewritten history to the shared main branch",
+    ],
     ranked: false,
-    options: opts(["standard", "Run the attempt as configured"], ["minimal", "Run the attempt with the smallest operation set"]),
+    options: opts(
+      ["standard", "Run the attempt as configured"],
+      ["minimal", "Run the attempt with the smallest operation set"],
+    ),
     reasonCodes: ROUTING_REASONS,
     deterministic: noRule,
-    label: labeled("minimal", "high-risk shared-history rewrite should run with the smallest operation set"),
+    label: labeled(
+      "minimal",
+      "high-risk shared-history rewrite should run with the smallest operation set",
+    ),
     difficulty: "medium",
     source: "derived-production-spec",
     signals: signals("2-options", "risk-boundary"),
   },
   {
     domain: "routing",
-    question: 'Which execution route should task work at risk level "critical" take?',
-    context: ["risk:critical", "scope:delete rows from the production database during business hours"],
+    question:
+      'Which execution route should task work at risk level "critical" take?',
+    context: [
+      "risk:critical",
+      "scope:delete rows from the production database during business hours",
+    ],
     ranked: false,
-    options: opts(["standard", "Run the attempt as configured"], ["minimal", "Run the attempt with the smallest operation set"], ["defer-to-human", "Perform no operation and defer to a human"]),
+    options: opts(
+      ["standard", "Run the attempt as configured"],
+      ["minimal", "Run the attempt with the smallest operation set"],
+      ["defer-to-human", "Perform no operation and defer to a human"],
+    ),
     reasonCodes: ROUTING_REASONS,
     deterministic: noRule,
-    label: labeled("defer-to-human", "irreversible production deletion belongs with a human before any operation"),
+    label: labeled(
+      "defer-to-human",
+      "irreversible production deletion belongs with a human before any operation",
+    ),
     difficulty: "medium",
     source: "derived-production-spec",
     signals: signals("3-options", "risk-boundary", "irreversible"),
   },
   {
     domain: "routing",
-    question: 'Which execution route should task work at risk level "low" take?',
+    question:
+      'Which execution route should task work at risk level "low" take?',
     context: ["risk:low", "scope:add a unit test for a pure helper function"],
     ranked: false,
-    options: opts(["standard", "Run the attempt as configured"], ["minimal", "Run the attempt with the smallest operation set"], ["defer-to-human", "Perform no operation and defer to a human"]),
+    options: opts(
+      ["standard", "Run the attempt as configured"],
+      ["minimal", "Run the attempt with the smallest operation set"],
+      ["defer-to-human", "Perform no operation and defer to a human"],
+    ),
     reasonCodes: ROUTING_REASONS,
     deterministic: noRule,
     label: labeled("standard", "routine low-risk work with no reason to defer"),
@@ -177,26 +217,46 @@ const ROUTING: readonly Row[] = [
   },
   {
     domain: "routing",
-    question: 'Which execution route should task work at risk level "high" take?',
-    context: ["risk:high", "scope:run a downloaded script that has never been reviewed"],
+    question:
+      'Which execution route should task work at risk level "high" take?',
+    context: [
+      "risk:high",
+      "scope:run a downloaded script that has never been reviewed",
+    ],
     ranked: false,
-    options: opts(["standard", "Run the attempt as configured"], ["minimal", "Run the attempt with the smallest operation set"]),
+    options: opts(
+      ["standard", "Run the attempt as configured"],
+      ["minimal", "Run the attempt with the smallest operation set"],
+    ),
     reasonCodes: ROUTING_REASONS,
     deterministic: noRule,
-    label: labeled("minimal", "unreviewed executable content: smallest operation set only"),
+    label: labeled(
+      "minimal",
+      "unreviewed executable content: smallest operation set only",
+    ),
     difficulty: "medium",
     source: "derived-production-spec",
     signals: signals("2-options", "risk-boundary", "unreviewed-executable"),
   },
   {
     domain: "routing",
-    question: 'Which execution route should task work at risk level "medium" take?',
-    context: ["risk:medium", "scope:edit three files in the deploy configuration"],
+    question:
+      'Which execution route should task work at risk level "medium" take?',
+    context: [
+      "risk:medium",
+      "scope:edit three files in the deploy configuration",
+    ],
     ranked: false,
-    options: opts(["standard", "Run the attempt as configured"], ["minimal", "Run the attempt with the smallest operation set"]),
+    options: opts(
+      ["standard", "Run the attempt as configured"],
+      ["minimal", "Run the attempt with the smallest operation set"],
+    ),
     reasonCodes: ROUTING_REASONS,
     deterministic: noRule,
-    label: labeled("minimal", "deploy-adjacent edits favour the narrower route"),
+    label: labeled(
+      "minimal",
+      "deploy-adjacent edits favour the narrower route",
+    ),
     difficulty: "hard",
     source: "derived-production-spec",
     signals: signals("2-options", "deploy-adjacent", "competing-valid-actions"),
@@ -222,133 +282,242 @@ const RISK_REASONS = [
 const RISK: readonly Row[] = [
   {
     domain: "risk-assessment",
-    question: 'What contextual risk does operation "delete" carry, beyond its "critical" baseline?',
+    question:
+      'What contextual risk does operation "delete" carry, beyond its "critical" baseline?',
     context: ["op:delete", "target:workspace build output directory"],
     ranked: false,
-    options: opts(["low", "low risk"], ["medium", "medium risk"], ["high", "high risk"], ["critical", "critical risk"]),
+    options: opts(
+      ["low", "low risk"],
+      ["medium", "medium risk"],
+      ["high", "high risk"],
+      ["critical", "critical risk"],
+    ),
     reasonCodes: RISK_REASONS,
     deterministic: clear("critical", "baseline-risk"),
-    label: labeled("critical", "deterministic floor already critical; context cannot lower it"),
+    label: labeled(
+      "critical",
+      "deterministic floor already critical; context cannot lower it",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("4-options", "deterministic-gate-covers"),
   },
   {
     domain: "risk-assessment",
-    question: 'What contextual risk does operation "db-destructive" carry, beyond its "critical" baseline?',
+    question:
+      'What contextual risk does operation "db-destructive" carry, beyond its "critical" baseline?',
     context: ["op:db-destructive", "target:production orders table"],
     ranked: false,
-    options: opts(["low", "low risk"], ["medium", "medium risk"], ["high", "high risk"], ["critical", "critical risk"]),
+    options: opts(
+      ["low", "low risk"],
+      ["medium", "medium risk"],
+      ["high", "high risk"],
+      ["critical", "critical risk"],
+    ),
     reasonCodes: RISK_REASONS,
     deterministic: clear("critical", "baseline-risk"),
-    label: labeled("critical", "critical baseline; nothing in context mitigates"),
+    label: labeled(
+      "critical",
+      "critical baseline; nothing in context mitigates",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("4-options", "deterministic-gate-covers"),
   },
   {
     domain: "risk-assessment",
-    question: 'What contextual risk does operation "write" carry, beyond its "medium" baseline?',
+    question:
+      'What contextual risk does operation "write" carry, beyond its "medium" baseline?',
     context: ["op:write", "target:README.md badge url"],
     ranked: false,
-    options: opts(["low", "low risk"], ["medium", "medium risk"], ["high", "high risk"], ["critical", "critical risk"]),
+    options: opts(
+      ["low", "low risk"],
+      ["medium", "medium risk"],
+      ["high", "high risk"],
+      ["critical", "critical risk"],
+    ),
     reasonCodes: RISK_REASONS,
     deterministic: noRule,
-    label: labeled("medium", "docs edit with no security or irreversibility signal"),
+    label: labeled(
+      "medium",
+      "docs edit with no security or irreversibility signal",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("4-options", "low-ambiguity"),
   },
   {
     domain: "risk-assessment",
-    question: 'What contextual risk does operation "write" carry, beyond its "medium" baseline?',
-    context: ["op:write", "target:src/auth/session-token-validator.ts", "note:file sits on the credential validation path"],
+    question:
+      'What contextual risk does operation "write" carry, beyond its "medium" baseline?',
+    context: [
+      "op:write",
+      "target:src/auth/session-token-validator.ts",
+      "note:file sits on the credential validation path",
+    ],
     ranked: false,
-    options: opts(["low", "low risk"], ["medium", "medium risk"], ["high", "high risk"], ["critical", "critical risk"]),
+    options: opts(
+      ["low", "low risk"],
+      ["medium", "medium risk"],
+      ["high", "high risk"],
+      ["critical", "critical risk"],
+    ),
     reasonCodes: RISK_REASONS,
     deterministic: noRule,
-    label: labeled("high", "credential-adjacent code raises contextual risk above its medium baseline"),
+    label: labeled(
+      "high",
+      "credential-adjacent code raises contextual risk above its medium baseline",
+    ),
     difficulty: "medium",
     source: "derived-production-spec",
     signals: signals("4-options", "credential-adjacent", "risk-boundary"),
   },
   {
     domain: "risk-assessment",
-    question: 'What contextual risk does operation "dependency-install" carry, beyond its "high" baseline?',
-    context: ["op:dependency-install", "package:exact-pinned version from the internal registry"],
+    question:
+      'What contextual risk does operation "dependency-install" carry, beyond its "high" baseline?',
+    context: [
+      "op:dependency-install",
+      "package:exact-pinned version from the internal registry",
+    ],
     ranked: false,
-    options: opts(["low", "low risk"], ["medium", "medium risk"], ["high", "high risk"], ["critical", "critical risk"]),
+    options: opts(
+      ["low", "low risk"],
+      ["medium", "medium risk"],
+      ["high", "high risk"],
+      ["critical", "critical risk"],
+    ),
     reasonCodes: RISK_REASONS,
     deterministic: noRule,
-    label: labeled("high", "pinned internal-registry install stays at its high baseline"),
+    label: labeled(
+      "high",
+      "pinned internal-registry install stays at its high baseline",
+    ),
     difficulty: "medium",
     source: "derived-production-spec",
     signals: signals("4-options", "supply-chain"),
   },
   {
     domain: "risk-assessment",
-    question: 'What contextual risk does operation "dependency-install" carry, beyond its "high" baseline?',
-    context: ["op:dependency-install", "package:latest tag from an unlisted public source", "note:no version pin and no registry allowlist"],
+    question:
+      'What contextual risk does operation "dependency-install" carry, beyond its "high" baseline?',
+    context: [
+      "op:dependency-install",
+      "package:latest tag from an unlisted public source",
+      "note:no version pin and no registry allowlist",
+    ],
     ranked: false,
-    options: opts(["low", "low risk"], ["medium", "medium risk"], ["high", "high risk"], ["critical", "critical risk"]),
+    options: opts(
+      ["low", "low risk"],
+      ["medium", "medium risk"],
+      ["high", "high risk"],
+      ["critical", "critical risk"],
+    ),
     reasonCodes: RISK_REASONS,
     deterministic: noRule,
-    label: labeled("critical", "unpinned dependency from an unknown source is a critical supply-chain signal"),
+    label: labeled(
+      "critical",
+      "unpinned dependency from an unknown source is a critical supply-chain signal",
+    ),
     difficulty: "medium",
     source: "derived-production-spec",
     signals: signals("4-options", "supply-chain", "risk-boundary"),
   },
   {
     domain: "risk-assessment",
-    question: 'What contextual risk does operation "deploy" carry, beyond its "critical" baseline?',
+    question:
+      'What contextual risk does operation "deploy" carry, beyond its "critical" baseline?',
     context: ["op:deploy", "target:staging environment"],
     ranked: false,
-    options: opts(["low", "low risk"], ["medium", "medium risk"], ["high", "high risk"], ["critical", "critical risk"]),
+    options: opts(
+      ["low", "low risk"],
+      ["medium", "medium risk"],
+      ["high", "high risk"],
+      ["critical", "critical risk"],
+    ),
     reasonCodes: RISK_REASONS,
     deterministic: clear("critical", "baseline-risk"),
-    label: labeled("critical", "deploy baseline is critical by policy regardless of environment"),
+    label: labeled(
+      "critical",
+      "deploy baseline is critical by policy regardless of environment",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("4-options", "deterministic-gate-covers"),
   },
   {
     domain: "risk-assessment",
-    question: 'What contextual risk does operation "execute" carry, beyond its "medium" baseline?',
+    question:
+      'What contextual risk does operation "execute" carry, beyond its "medium" baseline?',
     context: ["op:execute", "command:project's own test suite"],
     ranked: false,
-    options: opts(["low", "low risk"], ["medium", "medium risk"], ["high", "high risk"], ["critical", "critical risk"]),
+    options: opts(
+      ["low", "low risk"],
+      ["medium", "medium risk"],
+      ["high", "high risk"],
+      ["critical", "critical risk"],
+    ),
     reasonCodes: RISK_REASONS,
     deterministic: noRule,
-    label: labeled("medium", "running the project's own tests carries no signal above the baseline"),
+    label: labeled(
+      "medium",
+      "running the project's own tests carries no signal above the baseline",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("4-options"),
   },
   {
     domain: "risk-assessment",
-    question: 'What contextual risk does operation "network" carry, beyond its "medium" baseline?',
+    question:
+      'What contextual risk does operation "network" carry, beyond its "medium" baseline?',
     context: ["op:network", "target:package metadata on the public registry"],
     ranked: false,
-    options: opts(["low", "low risk"], ["medium", "medium risk"], ["high", "high risk"], ["critical", "critical risk"]),
+    options: opts(
+      ["low", "low risk"],
+      ["medium", "medium risk"],
+      ["high", "high risk"],
+      ["critical", "critical risk"],
+    ),
     reasonCodes: RISK_REASONS,
     deterministic: noRule,
-    label: labeled("medium", "public metadata read stays at the network baseline"),
+    label: labeled(
+      "medium",
+      "public metadata read stays at the network baseline",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("4-options"),
   },
   {
     domain: "risk-assessment",
-    question: 'What contextual risk does operation "write" carry, beyond its "medium" baseline?',
-    context: ["op:write", "target:.env.example", "note:template file, values are placeholders"],
+    question:
+      'What contextual risk does operation "write" carry, beyond its "medium" baseline?',
+    context: [
+      "op:write",
+      "target:.env.example",
+      "note:template file, values are placeholders",
+    ],
     ranked: false,
-    options: opts(["low", "low risk"], ["medium", "medium risk"], ["high", "high risk"], ["critical", "critical risk"]),
+    options: opts(
+      ["low", "low risk"],
+      ["medium", "medium risk"],
+      ["high", "high risk"],
+      ["critical", "critical risk"],
+    ),
     reasonCodes: RISK_REASONS,
     deterministic: noRule,
-    label: labeled("medium", "placeholder template; no secret material exists in it"),
+    label: labeled(
+      "medium",
+      "placeholder template; no secret material exists in it",
+    ),
     difficulty: "hard",
     source: "derived-production-spec",
-    signals: signals("4-options", "credential-adjacent-path", "competing-valid-actions"),
+    signals: signals(
+      "4-options",
+      "credential-adjacent-path",
+      "competing-valid-actions",
+    ),
     note: "the path looks credential-adjacent but the content is placeholders; hard by ambiguity, not by difficulty",
   },
 ];
@@ -372,12 +541,24 @@ const RETRY: readonly Row[] = [
   {
     domain: "retry",
     question: 'Should the attempt be retried after a "timeout" failure?',
-    context: ["failure-kind:timeout", "retryable:true", "attempts-spent:0", "retries-remaining:2"],
+    context: [
+      "failure-kind:timeout",
+      "retryable:true",
+      "attempts-spent:0",
+      "retries-remaining:2",
+    ],
     ranked: false,
-    options: opts(["retry", "Retry within the deterministic limits"], ["stop", "Stop and report the failure"], ["escalate", "Escalate to a human"]),
+    options: opts(
+      ["retry", "Retry within the deterministic limits"],
+      ["stop", "Stop and report the failure"],
+      ["escalate", "Escalate to a human"],
+    ),
     reasonCodes: RETRY_REASONS,
     deterministic: noRule,
-    label: labeled("retry", "a timeout on the first attempt is the canonical transient failure"),
+    label: labeled(
+      "retry",
+      "a timeout on the first attempt is the canonical transient failure",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("3-options", "canonical-transient"),
@@ -385,9 +566,18 @@ const RETRY: readonly Row[] = [
   {
     domain: "retry",
     question: 'Should the attempt be retried after a "rate-limit" failure?',
-    context: ["failure-kind:rate-limit", "retryable:true", "attempts-spent:0", "retries-remaining:2"],
+    context: [
+      "failure-kind:rate-limit",
+      "retryable:true",
+      "attempts-spent:0",
+      "retries-remaining:2",
+    ],
     ranked: false,
-    options: opts(["retry", "Retry within the deterministic limits"], ["stop", "Stop and report the failure"], ["escalate", "Escalate to a human"]),
+    options: opts(
+      ["retry", "Retry within the deterministic limits"],
+      ["stop", "Stop and report the failure"],
+      ["escalate", "Escalate to a human"],
+    ),
     reasonCodes: RETRY_REASONS,
     deterministic: noRule,
     label: labeled("retry", "rate limits clear on their own; first attempt"),
@@ -398,9 +588,18 @@ const RETRY: readonly Row[] = [
   {
     domain: "retry",
     question: 'Should the attempt be retried after a "server" failure?',
-    context: ["failure-kind:server", "retryable:true", "attempts-spent:1", "retries-remaining:1"],
+    context: [
+      "failure-kind:server",
+      "retryable:true",
+      "attempts-spent:1",
+      "retries-remaining:1",
+    ],
     ranked: false,
-    options: opts(["retry", "Retry within the deterministic limits"], ["stop", "Stop and report the failure"], ["escalate", "Escalate to a human"]),
+    options: opts(
+      ["retry", "Retry within the deterministic limits"],
+      ["stop", "Stop and report the failure"],
+      ["escalate", "Escalate to a human"],
+    ),
     reasonCodes: RETRY_REASONS,
     deterministic: noRule,
     label: labeled("retry", "one 5xx, retries still available"),
@@ -411,12 +610,24 @@ const RETRY: readonly Row[] = [
   {
     domain: "retry",
     question: 'Should the attempt be retried after a "server" failure?',
-    context: ["failure-kind:server", "retryable:true", "attempts-spent:2", "retries-remaining:0"],
+    context: [
+      "failure-kind:server",
+      "retryable:true",
+      "attempts-spent:2",
+      "retries-remaining:0",
+    ],
     ranked: false,
-    options: opts(["retry", "Retry within the deterministic limits"], ["stop", "Stop and report the failure"], ["escalate", "Escalate to a human"]),
+    options: opts(
+      ["retry", "Retry within the deterministic limits"],
+      ["stop", "Stop and report the failure"],
+      ["escalate", "Escalate to a human"],
+    ),
     reasonCodes: RETRY_REASONS,
     deterministic: clear("stop", "budget-exhausted"),
-    label: labeled("stop", "the deterministic gate already answers: no retries remain"),
+    label: labeled(
+      "stop",
+      "the deterministic gate already answers: no retries remain",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("3-options", "deterministic-gate-covers"),
@@ -424,25 +635,50 @@ const RETRY: readonly Row[] = [
   {
     domain: "retry",
     question: 'Should the attempt be retried after an "auth" failure?',
-    context: ["failure-kind:auth", "retryable:false", "attempts-spent:0", "retries-remaining:2"],
+    context: [
+      "failure-kind:auth",
+      "retryable:false",
+      "attempts-spent:0",
+      "retries-remaining:2",
+    ],
     ranked: false,
-    options: opts(["retry", "Retry within the deterministic limits"], ["stop", "Stop and report the failure"], ["escalate", "Escalate to a human"]),
+    options: opts(
+      ["retry", "Retry within the deterministic limits"],
+      ["stop", "Stop and report the failure"],
+      ["escalate", "Escalate to a human"],
+    ),
     reasonCodes: RETRY_REASONS,
     deterministic: clear("stop", "failure-not-retryable"),
-    label: labeled("stop", "auth failures are deterministic non-retryables; the gate answers"),
+    label: labeled(
+      "stop",
+      "auth failures are deterministic non-retryables; the gate answers",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("3-options", "deterministic-gate-covers"),
   },
   {
     domain: "retry",
-    question: 'Should the attempt be retried after a "malformed-response" failure?',
-    context: ["failure-kind:malformed-response", "retryable:false", "attempts-spent:0", "retries-remaining:2"],
+    question:
+      'Should the attempt be retried after a "malformed-response" failure?',
+    context: [
+      "failure-kind:malformed-response",
+      "retryable:false",
+      "attempts-spent:0",
+      "retries-remaining:2",
+    ],
     ranked: false,
-    options: opts(["retry", "Retry within the deterministic limits"], ["stop", "Stop and report the failure"], ["escalate", "Escalate to a human"]),
+    options: opts(
+      ["retry", "Retry within the deterministic limits"],
+      ["stop", "Stop and report the failure"],
+      ["escalate", "Escalate to a human"],
+    ),
     reasonCodes: RETRY_REASONS,
     deterministic: clear("stop", "failure-not-retryable"),
-    label: labeled("stop", "malformed response is classified non-retryable by the shared taxonomy"),
+    label: labeled(
+      "stop",
+      "malformed response is classified non-retryable by the shared taxonomy",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("3-options", "deterministic-gate-covers"),
@@ -450,9 +686,18 @@ const RETRY: readonly Row[] = [
   {
     domain: "retry",
     question: 'Should the attempt be retried after a "timeout" failure?',
-    context: ["failure-kind:timeout", "retryable:true", "attempts-spent:3", "retries-remaining:0"],
+    context: [
+      "failure-kind:timeout",
+      "retryable:true",
+      "attempts-spent:3",
+      "retries-remaining:0",
+    ],
     ranked: false,
-    options: opts(["retry", "Retry within the deterministic limits"], ["stop", "Stop and report the failure"], ["escalate", "Escalate to a human"]),
+    options: opts(
+      ["retry", "Retry within the deterministic limits"],
+      ["stop", "Stop and report the failure"],
+      ["escalate", "Escalate to a human"],
+    ),
     reasonCodes: RETRY_REASONS,
     deterministic: clear("stop", "retry-limit-reached"),
     label: labeled("stop", "attempt cap spent; gate answers"),
@@ -463,12 +708,25 @@ const RETRY: readonly Row[] = [
   {
     domain: "retry",
     question: 'Should the attempt be retried after a "timeout" failure?',
-    context: ["failure-kind:timeout", "retryable:true", "attempts-spent:3", "retries-remaining:0", "note:four timeouts in a row on the same step"],
+    context: [
+      "failure-kind:timeout",
+      "retryable:true",
+      "attempts-spent:3",
+      "retries-remaining:0",
+      "note:four timeouts in a row on the same step",
+    ],
     ranked: false,
-    options: opts(["retry", "Retry within the deterministic limits"], ["stop", "Stop and report the failure"], ["escalate", "Escalate to a human"]),
+    options: opts(
+      ["retry", "Retry within the deterministic limits"],
+      ["stop", "Stop and report the failure"],
+      ["escalate", "Escalate to a human"],
+    ),
     reasonCodes: RETRY_REASONS,
     deterministic: clear("stop", "retry-limit-reached"),
-    label: labeled("stop", "gate stops; the repeated-timeout pattern is escalation-worthy but retry is still out of budget"),
+    label: labeled(
+      "stop",
+      "gate stops; the repeated-timeout pattern is escalation-worthy but retry is still out of budget",
+    ),
     difficulty: "medium",
     source: "derived-production-spec",
     signals: signals("3-options", "repeated-failure-pattern"),
@@ -476,9 +734,19 @@ const RETRY: readonly Row[] = [
   {
     domain: "retry",
     question: 'Should the attempt be retried after a "network" failure?',
-    context: ["failure-kind:network", "retryable:true", "attempts-spent:0", "retries-remaining:2", "note:dns resolution failing for all hosts"],
+    context: [
+      "failure-kind:network",
+      "retryable:true",
+      "attempts-spent:0",
+      "retries-remaining:2",
+      "note:dns resolution failing for all hosts",
+    ],
     ranked: false,
-    options: opts(["retry", "Retry within the deterministic limits"], ["stop", "Stop and report the failure"], ["escalate", "Escalate to a human"]),
+    options: opts(
+      ["retry", "Retry within the deterministic limits"],
+      ["stop", "Stop and report the failure"],
+      ["escalate", "Escalate to a human"],
+    ),
     reasonCodes: RETRY_REASONS,
     deterministic: noRule,
     label: labeled("retry", "single transient network error with budget left"),
@@ -506,12 +774,23 @@ const COMPLETION: readonly Row[] = [
   {
     domain: "completion",
     question: "Does the recorded evidence suggest this task is complete?",
-    context: ["criteria:2/2", "verification-checks:3", "verification-failures:0"],
+    context: [
+      "criteria:2/2",
+      "verification-checks:3",
+      "verification-failures:0",
+    ],
     ranked: false,
-    options: opts(["complete", "Evidence suggests the task is complete"], ["incomplete", "Evidence suggests the task is not complete"], ["uncertain", "Evidence is insufficient to say"]),
+    options: opts(
+      ["complete", "Evidence suggests the task is complete"],
+      ["incomplete", "Evidence suggests the task is not complete"],
+      ["uncertain", "Evidence is insufficient to say"],
+    ),
     reasonCodes: COMPLETION_REASONS,
     deterministic: noRule,
-    label: labeled("complete", "all criteria met and every verification passed"),
+    label: labeled(
+      "complete",
+      "all criteria met and every verification passed",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("3-options", "consistent-evidence"),
@@ -521,10 +800,17 @@ const COMPLETION: readonly Row[] = [
     question: "Does the recorded evidence suggest this task is complete?",
     context: ["criteria:2/2", "verification-checks:0"],
     ranked: false,
-    options: opts(["complete", "Evidence suggests the task is complete"], ["incomplete", "Evidence suggests the task is not complete"], ["uncertain", "Evidence is insufficient to say"]),
+    options: opts(
+      ["complete", "Evidence suggests the task is complete"],
+      ["incomplete", "Evidence suggests the task is not complete"],
+      ["uncertain", "Evidence is insufficient to say"],
+    ),
     reasonCodes: COMPLETION_REASONS,
     deterministic: clear("uncertain", "no-verification-evidence"),
-    label: labeled("uncertain", "the gate already answers: no verification evidence exists"),
+    label: labeled(
+      "uncertain",
+      "the gate already answers: no verification evidence exists",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("3-options", "deterministic-gate-covers"),
@@ -532,9 +818,17 @@ const COMPLETION: readonly Row[] = [
   {
     domain: "completion",
     question: "Does the recorded evidence suggest this task is complete?",
-    context: ["criteria:2/2", "verification-checks:2", "verification-failures:1"],
+    context: [
+      "criteria:2/2",
+      "verification-checks:2",
+      "verification-failures:1",
+    ],
     ranked: false,
-    options: opts(["complete", "Evidence suggests the task is complete"], ["incomplete", "Evidence suggests the task is not complete"], ["uncertain", "Evidence is insufficient to say"]),
+    options: opts(
+      ["complete", "Evidence suggests the task is complete"],
+      ["incomplete", "Evidence suggests the task is not complete"],
+      ["uncertain", "Evidence is insufficient to say"],
+    ),
     reasonCodes: COMPLETION_REASONS,
     deterministic: clear("incomplete", "verification-failed"),
     label: labeled("incomplete", "the gate already answers: a check failed"),
@@ -545,12 +839,23 @@ const COMPLETION: readonly Row[] = [
   {
     domain: "completion",
     question: "Does the recorded evidence suggest this task is complete?",
-    context: ["criteria:1/3", "verification-checks:2", "verification-failures:0"],
+    context: [
+      "criteria:1/3",
+      "verification-checks:2",
+      "verification-failures:0",
+    ],
     ranked: false,
-    options: opts(["complete", "Evidence suggests the task is complete"], ["incomplete", "Evidence suggests the task is not complete"], ["uncertain", "Evidence is insufficient to say"]),
+    options: opts(
+      ["complete", "Evidence suggests the task is complete"],
+      ["incomplete", "Evidence suggests the task is not complete"],
+      ["uncertain", "Evidence is insufficient to say"],
+    ),
     reasonCodes: COMPLETION_REASONS,
     deterministic: noRule,
-    label: labeled("incomplete", "one of three criteria met with passing checks: work remains"),
+    label: labeled(
+      "incomplete",
+      "one of three criteria met with passing checks: work remains",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("3-options"),
@@ -560,10 +865,17 @@ const COMPLETION: readonly Row[] = [
     question: "Does the recorded evidence suggest this task is complete?",
     context: ["criteria:3/3", "verification-checks:0"],
     ranked: false,
-    options: opts(["complete", "Evidence suggests the task is complete"], ["incomplete", "Evidence suggests the task is not complete"], ["uncertain", "Evidence is insufficient to say"]),
+    options: opts(
+      ["complete", "Evidence suggests the task is complete"],
+      ["incomplete", "Evidence suggests the task is not complete"],
+      ["uncertain", "Evidence is insufficient to say"],
+    ),
     reasonCodes: COMPLETION_REASONS,
     deterministic: clear("uncertain", "no-verification-evidence"),
-    label: labeled("uncertain", "gate answers: no verification evidence, criteria self-reported"),
+    label: labeled(
+      "uncertain",
+      "gate answers: no verification evidence, criteria self-reported",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("3-options", "deterministic-gate-covers"),
@@ -571,9 +883,17 @@ const COMPLETION: readonly Row[] = [
   {
     domain: "completion",
     question: "Does the recorded evidence suggest this task is complete?",
-    context: ["criteria:0/2", "verification-checks:1", "verification-failures:0"],
+    context: [
+      "criteria:0/2",
+      "verification-checks:1",
+      "verification-failures:0",
+    ],
     ranked: false,
-    options: opts(["complete", "Evidence suggests the task is complete"], ["incomplete", "Evidence suggests the task is not complete"], ["uncertain", "Evidence is insufficient to say"]),
+    options: opts(
+      ["complete", "Evidence suggests the task is complete"],
+      ["incomplete", "Evidence suggests the task is not complete"],
+      ["uncertain", "Evidence is insufficient to say"],
+    ),
     reasonCodes: COMPLETION_REASONS,
     deterministic: noRule,
     label: labeled("incomplete", "no criteria met and one check run"),
@@ -584,12 +904,24 @@ const COMPLETION: readonly Row[] = [
   {
     domain: "completion",
     question: "Does the recorded evidence suggest this task is complete?",
-    context: ["criteria:2/4", "verification-checks:4", "verification-failures:0", "note:checks pass but cover only completed criteria"],
+    context: [
+      "criteria:2/4",
+      "verification-checks:4",
+      "verification-failures:0",
+      "note:checks pass but cover only completed criteria",
+    ],
     ranked: false,
-    options: opts(["complete", "Evidence suggests the task is complete"], ["incomplete", "Evidence suggests the task is not complete"], ["uncertain", "Evidence is insufficient to say"]),
+    options: opts(
+      ["complete", "Evidence suggests the task is complete"],
+      ["incomplete", "Evidence suggests the task is not complete"],
+      ["uncertain", "Evidence is insufficient to say"],
+    ),
     reasonCodes: COMPLETION_REASONS,
     deterministic: noRule,
-    label: labeled("incomplete", "half the criteria remain; passing checks on finished work do not complete the task"),
+    label: labeled(
+      "incomplete",
+      "half the criteria remain; passing checks on finished work do not complete the task",
+    ),
     difficulty: "medium",
     source: "derived-production-spec",
     signals: signals("3-options", "partial-evidence"),
@@ -597,12 +929,23 @@ const COMPLETION: readonly Row[] = [
   {
     domain: "completion",
     question: "Does the recorded evidence suggest this task is complete?",
-    context: ["criteria:unmeasured/3", "verification-checks:2", "verification-failures:0"],
+    context: [
+      "criteria:unmeasured/3",
+      "verification-checks:2",
+      "verification-failures:0",
+    ],
     ranked: false,
-    options: opts(["complete", "Evidence suggests the task is complete"], ["incomplete", "Evidence suggests the task is not complete"], ["uncertain", "Evidence is insufficient to say"]),
+    options: opts(
+      ["complete", "Evidence suggests the task is complete"],
+      ["incomplete", "Evidence suggests the task is not complete"],
+      ["uncertain", "Evidence is insufficient to say"],
+    ),
     reasonCodes: COMPLETION_REASONS,
     deterministic: noRule,
-    label: labeled("uncertain", "criterion progress was never measured; checks alone cannot establish completion"),
+    label: labeled(
+      "uncertain",
+      "criterion progress was never measured; checks alone cannot establish completion",
+    ),
     difficulty: "medium",
     source: "derived-production-spec",
     signals: signals("3-options", "unmeasured-criteria"),
@@ -610,9 +953,18 @@ const COMPLETION: readonly Row[] = [
   {
     domain: "completion",
     question: "Does the recorded evidence suggest this task is complete?",
-    context: ["criteria:3/3", "verification-checks:3", "verification-failures:0", "note:all checks green, criteria self-reported complete"],
+    context: [
+      "criteria:3/3",
+      "verification-checks:3",
+      "verification-failures:0",
+      "note:all checks green, criteria self-reported complete",
+    ],
     ranked: false,
-    options: opts(["complete", "Evidence suggests the task is complete"], ["incomplete", "Evidence suggests the task is not complete"], ["uncertain", "Evidence is insufficient to say"]),
+    options: opts(
+      ["complete", "Evidence suggests the task is complete"],
+      ["incomplete", "Evidence suggests the task is not complete"],
+      ["uncertain", "Evidence is insufficient to say"],
+    ),
     reasonCodes: COMPLETION_REASONS,
     deterministic: noRule,
     label: labeled("complete", "full criteria with full passing verification"),
@@ -641,10 +993,16 @@ const ESCALATION: readonly Row[] = [
     question: "Should a human review this outcome before the task is closed?",
     context: ["fact:security-refusal"],
     ranked: false,
-    options: opts(["review", "Recommend human review"], ["no-review", "Recommend no human review"]),
+    options: opts(
+      ["review", "Recommend human review"],
+      ["no-review", "Recommend no human review"],
+    ),
     reasonCodes: ESCALATION_REASONS,
     deterministic: clear("review", "security-refusal"),
-    label: labeled("review", "the gate already answers: a security refusal always goes to a human"),
+    label: labeled(
+      "review",
+      "the gate already answers: a security refusal always goes to a human",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("2-options", "deterministic-gate-covers"),
@@ -652,12 +1010,21 @@ const ESCALATION: readonly Row[] = [
   {
     domain: "human-escalation",
     question: "Should a human review this outcome before the task is closed?",
-    context: ["fact:policy-denial", "fact:attempted:filesystem.write outside workspace"],
+    context: [
+      "fact:policy-denial",
+      "fact:attempted:filesystem.write outside workspace",
+    ],
     ranked: false,
-    options: opts(["review", "Recommend human review"], ["no-review", "Recommend no human review"]),
+    options: opts(
+      ["review", "Recommend human review"],
+      ["no-review", "Recommend no human review"],
+    ),
     reasonCodes: ESCALATION_REASONS,
     deterministic: noRule,
-    label: labeled("review", "a policy denial is a boundary event a human should see"),
+    label: labeled(
+      "review",
+      "a policy denial is a boundary event a human should see",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("2-options", "boundary-event"),
@@ -667,10 +1034,16 @@ const ESCALATION: readonly Row[] = [
     question: "Should a human review this outcome before the task is closed?",
     context: ["fact:attempt-failed", "fact:attempt-count:4"],
     ranked: false,
-    options: opts(["review", "Recommend human review"], ["no-review", "Recommend no human review"]),
+    options: opts(
+      ["review", "Recommend human review"],
+      ["no-review", "Recommend no human review"],
+    ),
     reasonCodes: ESCALATION_REASONS,
     deterministic: noRule,
-    label: labeled("review", "four failed attempts is the repeated-failure pattern"),
+    label: labeled(
+      "review",
+      "four failed attempts is the repeated-failure pattern",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("2-options"),
@@ -678,12 +1051,22 @@ const ESCALATION: readonly Row[] = [
   {
     domain: "human-escalation",
     question: "Should a human review this outcome before the task is closed?",
-    context: ["fact:attempt-failed", "fact:attempt-count:1", "fact:failure-kind:timeout"],
+    context: [
+      "fact:attempt-failed",
+      "fact:attempt-count:1",
+      "fact:failure-kind:timeout",
+    ],
     ranked: false,
-    options: opts(["review", "Recommend human review"], ["no-review", "Recommend no human review"]),
+    options: opts(
+      ["review", "Recommend human review"],
+      ["no-review", "Recommend no human review"],
+    ),
     reasonCodes: ESCALATION_REASONS,
     deterministic: noRule,
-    label: labeled("no-review", "one transient timeout is routine; retry policy owns it"),
+    label: labeled(
+      "no-review",
+      "one transient timeout is routine; retry policy owns it",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("2-options"),
@@ -693,7 +1076,10 @@ const ESCALATION: readonly Row[] = [
     question: "Should a human review this outcome before the task is closed?",
     context: ["fact:verification-passed", "fact:criteria:3/3"],
     ranked: false,
-    options: opts(["review", "Recommend human review"], ["no-review", "Recommend no human review"]),
+    options: opts(
+      ["review", "Recommend human review"],
+      ["no-review", "Recommend no human review"],
+    ),
     reasonCodes: ESCALATION_REASONS,
     deterministic: noRule,
     label: labeled("no-review", "fully verified success is routine"),
@@ -706,10 +1092,16 @@ const ESCALATION: readonly Row[] = [
     question: "Should a human review this outcome before the task is closed?",
     context: ["fact:verification-passed", "fact:criteria:2/5"],
     ranked: false,
-    options: opts(["review", "Recommend human review"], ["no-review", "Recommend no human review"]),
+    options: opts(
+      ["review", "Recommend human review"],
+      ["no-review", "Recommend no human review"],
+    ),
     reasonCodes: ESCALATION_REASONS,
     deterministic: noRule,
-    label: labeled("review", "green checks against two-of-five criteria is contradictory evidence"),
+    label: labeled(
+      "review",
+      "green checks against two-of-five criteria is contradictory evidence",
+    ),
     difficulty: "hard",
     source: "derived-production-spec",
     signals: signals("2-options", "conflicting-signals"),
@@ -718,12 +1110,22 @@ const ESCALATION: readonly Row[] = [
   {
     domain: "human-escalation",
     question: "Should a human review this outcome before the task is closed?",
-    context: ["fact:resource-boundary", "fact:token-budget:exhausted", "fact:progress:partial"],
+    context: [
+      "fact:resource-boundary",
+      "fact:token-budget:exhausted",
+      "fact:progress:partial",
+    ],
     ranked: false,
-    options: opts(["review", "Recommend human review"], ["no-review", "Recommend no human review"]),
+    options: opts(
+      ["review", "Recommend human review"],
+      ["no-review", "Recommend no human review"],
+    ),
     reasonCodes: ESCALATION_REASONS,
     deterministic: noRule,
-    label: labeled("review", "ran out of budget mid-task with partial progress: a human should decide next steps"),
+    label: labeled(
+      "review",
+      "ran out of budget mid-task with partial progress: a human should decide next steps",
+    ),
     difficulty: "medium",
     source: "derived-production-spec",
     signals: signals("2-options", "resource-boundary"),
@@ -731,9 +1133,16 @@ const ESCALATION: readonly Row[] = [
   {
     domain: "human-escalation",
     question: "Should a human review this outcome before the task is closed?",
-    context: ["fact:criteria:1/1", "fact:verification-checks:1", "fact:verification-failures:0"],
+    context: [
+      "fact:criteria:1/1",
+      "fact:verification-checks:1",
+      "fact:verification-failures:0",
+    ],
     ranked: false,
-    options: opts(["review", "Recommend human review"], ["no-review", "Recommend no human review"]),
+    options: opts(
+      ["review", "Recommend human review"],
+      ["no-review", "Recommend no human review"],
+    ),
     reasonCodes: ESCALATION_REASONS,
     deterministic: noRule,
     label: labeled("no-review", "single criterion, verified: routine"),
@@ -744,12 +1153,21 @@ const ESCALATION: readonly Row[] = [
   {
     domain: "human-escalation",
     question: "Should a human review this outcome before the task is closed?",
-    context: ["fact:insufficient-evidence", "fact:attempt-stopped:approval-required"],
+    context: [
+      "fact:insufficient-evidence",
+      "fact:attempt-stopped:approval-required",
+    ],
     ranked: false,
-    options: opts(["review", "Recommend human review"], ["no-review", "Recommend no human review"]),
+    options: opts(
+      ["review", "Recommend human review"],
+      ["no-review", "Recommend no human review"],
+    ),
     reasonCodes: ESCALATION_REASONS,
     deterministic: noRule,
-    label: labeled("review", "an attempt stopped waiting for approval is definitionally a human decision point"),
+    label: labeled(
+      "review",
+      "an attempt stopped waiting for approval is definitionally a human decision point",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("2-options"),
@@ -768,45 +1186,148 @@ const RELEVANCE_REASONS = [
 ];
 
 const RELEVANCE: readonly Row[] = [
-  ["src/decisions/engine.ts", "tests/unit/decision-engine.test.ts", "relevant", "explicitly-referenced"],
-  ["src/adapters/llm/openai-compatible-provider.ts", "src/adapters/http/fetch-transport.ts", "relevant", "related-by-path"],
-  ["src/adapters/decision/typesafe-provider.ts", "src/adapters/decision/jev-http-provider.ts", "relevant", "related-by-path"],
-  ["src/observability/cost.ts", "src/observability/usage.ts", "relevant", "related-by-path"],
-  ["docs/architecture/V2-ARCHITECTURE.md", "docs/architecture/DECISIONS.md", "relevant", "related-by-path"],
+  [
+    "src/decisions/engine.ts",
+    "tests/unit/decision-engine.test.ts",
+    "relevant",
+    "explicitly-referenced",
+  ],
+  [
+    "src/adapters/llm/openai-compatible-provider.ts",
+    "src/adapters/http/fetch-transport.ts",
+    "relevant",
+    "related-by-path",
+  ],
+  [
+    "src/adapters/decision/typesafe-provider.ts",
+    "src/adapters/decision/jev-http-provider.ts",
+    "relevant",
+    "related-by-path",
+  ],
+  [
+    "src/observability/cost.ts",
+    "src/observability/usage.ts",
+    "relevant",
+    "related-by-path",
+  ],
+  [
+    "docs/architecture/V2-ARCHITECTURE.md",
+    "docs/architecture/DECISIONS.md",
+    "relevant",
+    "related-by-path",
+  ],
   ["pnpm-lock.yaml", "package.json", "relevant", "related-by-path"],
-  ["src/context/scoring.ts", "src/context/tokens.ts", "relevant", "related-by-path"],
-  ["src/policy/capability.ts", "src/policy/access-policy.ts", "relevant", "related-by-path"],
+  [
+    "src/context/scoring.ts",
+    "src/context/tokens.ts",
+    "relevant",
+    "related-by-path",
+  ],
+  [
+    "src/policy/capability.ts",
+    "src/policy/access-policy.ts",
+    "relevant",
+    "related-by-path",
+  ],
   ["src/core/ids.ts", "src/core/clock.ts", "relevant", "related-by-path"],
-  ["src/workspaces/workspace.ts", "src/projects/project.ts", "relevant", "related-by-path"],
-  ["scripts/verify.sh", "scripts/check-git-identity.sh", "relevant", "related-by-path"],
+  [
+    "src/workspaces/workspace.ts",
+    "src/projects/project.ts",
+    "relevant",
+    "related-by-path",
+  ],
+  [
+    "scripts/verify.sh",
+    "scripts/check-git-identity.sh",
+    "relevant",
+    "related-by-path",
+  ],
   [".github/workflows/ci.yml", "package.json", "relevant", "related-by-path"],
-  ["src/models/model.ts", "src/adapters/frontier/llm-frontier.ts", "relevant", "related-by-path"],
+  [
+    "src/models/model.ts",
+    "src/adapters/frontier/llm-frontier.ts",
+    "relevant",
+    "related-by-path",
+  ],
   ["eslint.config.js", "tsconfig.json", "relevant", "related-by-path"],
-  ["src/decisions/engine.ts", "src/adapters/decision/typesafe-provider.ts", "relevant", "related-by-path"],
-  ["src/decisions/engine.ts", "src/context/tokens.ts", "not-relevant", "unrelated"],
-  ["src/decisions/engine.ts", "src/models/model.ts", "not-relevant", "unrelated"],
-  ["src/decisions/engine.ts", "src/policy/capability.ts", "not-relevant", "unrelated"],
-  ["src/decisions/engine.ts", "docs/ARCHITECTURE.md", "not-relevant", "unrelated"],
-  ["src/decisions/engine.ts", "src/observability/cost.ts", "not-relevant", "unrelated"],
-  ["src/decisions/engine.ts", "src/adapters/llm/openai-compatible-provider.ts", "not-relevant", "unrelated"],
-  ["src/decisions/engine.ts", "src/workspaces/workspace.ts", "not-relevant", "unrelated"],
+  [
+    "src/decisions/engine.ts",
+    "src/adapters/decision/typesafe-provider.ts",
+    "relevant",
+    "related-by-path",
+  ],
+  [
+    "src/decisions/engine.ts",
+    "src/context/tokens.ts",
+    "not-relevant",
+    "unrelated",
+  ],
+  [
+    "src/decisions/engine.ts",
+    "src/models/model.ts",
+    "not-relevant",
+    "unrelated",
+  ],
+  [
+    "src/decisions/engine.ts",
+    "src/policy/capability.ts",
+    "not-relevant",
+    "unrelated",
+  ],
+  [
+    "src/decisions/engine.ts",
+    "docs/ARCHITECTURE.md",
+    "not-relevant",
+    "unrelated",
+  ],
+  [
+    "src/decisions/engine.ts",
+    "src/observability/cost.ts",
+    "not-relevant",
+    "unrelated",
+  ],
+  [
+    "src/decisions/engine.ts",
+    "src/adapters/llm/openai-compatible-provider.ts",
+    "not-relevant",
+    "unrelated",
+  ],
+  [
+    "src/decisions/engine.ts",
+    "src/workspaces/workspace.ts",
+    "not-relevant",
+    "unrelated",
+  ],
   ["src/decisions/engine.ts", "scripts/verify.sh", "not-relevant", "unrelated"],
-  ["src/decisions/engine.ts", "src/projects/project.ts", "not-relevant", "unrelated"],
-  ["src/decisions/engine.ts", "src/adapters/frontier/llm-frontier.ts", "not-relevant", "unrelated"],
+  [
+    "src/decisions/engine.ts",
+    "src/projects/project.ts",
+    "not-relevant",
+    "unrelated",
+  ],
+  [
+    "src/decisions/engine.ts",
+    "src/adapters/frontier/llm-frontier.ts",
+    "not-relevant",
+    "unrelated",
+  ],
 ].map((entry) => {
   const [primary, candidate, expected, reason] = entry as readonly string[];
   return {
     domain: "relevance",
     question: "Is the bounded candidate set relevant to this task?",
-    context: [
-      `task:work in ${primary}`,
-      `candidate:${candidate}`,
-    ],
+    context: [`task:work in ${primary}`, `candidate:${candidate}`],
     ranked: false,
-    options: opts(["relevant", "The candidate is relevant to the task"], ["not-relevant", "The candidate is not relevant to the task"]),
+    options: opts(
+      ["relevant", "The candidate is relevant to the task"],
+      ["not-relevant", "The candidate is not relevant to the task"],
+    ),
     reasonCodes: RELEVANCE_REASONS,
     deterministic: noRule,
-    label: labeled(expected, `candidate ${candidate} is ${expected} to work in ${primary}`),
+    label: labeled(
+      expected,
+      `candidate ${candidate} is ${expected} to work in ${primary}`,
+    ),
     difficulty: expected === "relevant" ? "easy" : "easy",
     source: "derived-production-spec" as const,
     signals: signals("2-options", reason),
@@ -830,23 +1351,40 @@ const SKILL_IDS = ["code-review", "test-runner", "doc-writer", "db-migration"];
 const SKILL: readonly Row[] = [
   {
     domain: "skill-selection",
-    question: "Which available skill, if any, is relevant to the current state?",
+    question:
+      "Which available skill, if any, is relevant to the current state?",
     context: ["state:diff ready for review, tests passing"],
     ranked: false,
-    options: opts(["code-review", "registered skill: code-review"], ["test-runner", "registered skill: test-runner"], ["doc-writer", "registered skill: doc-writer"], ["db-migration", "registered skill: db-migration"], ["no-skill", "No registered skill matches; proceed without one"]),
+    options: opts(
+      ["code-review", "registered skill: code-review"],
+      ["test-runner", "registered skill: test-runner"],
+      ["doc-writer", "registered skill: doc-writer"],
+      ["db-migration", "registered skill: db-migration"],
+      ["no-skill", "No registered skill matches; proceed without one"],
+    ),
     reasonCodes: SKILL_REASONS,
     deterministic: noRule,
-    label: labeled("code-review", "a reviewed diff with green tests is exactly the review skill's trigger"),
+    label: labeled(
+      "code-review",
+      "a reviewed diff with green tests is exactly the review skill's trigger",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("5-options"),
   },
   {
     domain: "skill-selection",
-    question: "Which available skill, if any, is relevant to the current state?",
+    question:
+      "Which available skill, if any, is relevant to the current state?",
     context: ["state:three failing tests after a refactor"],
     ranked: false,
-    options: opts(["code-review", "registered skill: code-review"], ["test-runner", "registered skill: test-runner"], ["doc-writer", "registered skill: doc-writer"], ["db-migration", "registered skill: db-migration"], ["no-skill", "No registered skill matches; proceed without one"]),
+    options: opts(
+      ["code-review", "registered skill: code-review"],
+      ["test-runner", "registered skill: test-runner"],
+      ["doc-writer", "registered skill: doc-writer"],
+      ["db-migration", "registered skill: db-migration"],
+      ["no-skill", "No registered skill matches; proceed without one"],
+    ),
     reasonCodes: SKILL_REASONS,
     deterministic: noRule,
     label: labeled("test-runner", "failing tests name the test skill"),
@@ -856,10 +1394,17 @@ const SKILL: readonly Row[] = [
   },
   {
     domain: "skill-selection",
-    question: "Which available skill, if any, is relevant to the current state?",
+    question:
+      "Which available skill, if any, is relevant to the current state?",
     context: ["state:README missing the new configuration section"],
     ranked: false,
-    options: opts(["code-review", "registered skill: code-review"], ["test-runner", "registered skill: test-runner"], ["doc-writer", "registered skill: doc-writer"], ["db-migration", "registered skill: db-migration"], ["no-skill", "No registered skill matches; proceed without one"]),
+    options: opts(
+      ["code-review", "registered skill: code-review"],
+      ["test-runner", "registered skill: test-runner"],
+      ["doc-writer", "registered skill: doc-writer"],
+      ["db-migration", "registered skill: db-migration"],
+      ["no-skill", "No registered skill matches; proceed without one"],
+    ),
     reasonCodes: SKILL_REASONS,
     deterministic: noRule,
     label: labeled("doc-writer", "missing documentation names the doc skill"),
@@ -869,10 +1414,17 @@ const SKILL: readonly Row[] = [
   },
   {
     domain: "skill-selection",
-    question: "Which available skill, if any, is relevant to the current state?",
+    question:
+      "Which available skill, if any, is relevant to the current state?",
     context: ["state:schema change requires a new column with backfill"],
     ranked: false,
-    options: opts(["code-review", "registered skill: code-review"], ["test-runner", "registered skill: test-runner"], ["doc-writer", "registered skill: doc-writer"], ["db-migration", "registered skill: db-migration"], ["no-skill", "No registered skill matches; proceed without one"]),
+    options: opts(
+      ["code-review", "registered skill: code-review"],
+      ["test-runner", "registered skill: test-runner"],
+      ["doc-writer", "registered skill: doc-writer"],
+      ["db-migration", "registered skill: db-migration"],
+      ["no-skill", "No registered skill matches; proceed without one"],
+    ),
     reasonCodes: SKILL_REASONS,
     deterministic: noRule,
     label: labeled("db-migration", "schema backfill is the migration skill"),
@@ -882,10 +1434,17 @@ const SKILL: readonly Row[] = [
   },
   {
     domain: "skill-selection",
-    question: "Which available skill, if any, is relevant to the current state?",
+    question:
+      "Which available skill, if any, is relevant to the current state?",
     context: ["state:rename a constant in one file"],
     ranked: false,
-    options: opts(["code-review", "registered skill: code-review"], ["test-runner", "registered skill: test-runner"], ["doc-writer", "registered skill: doc-writer"], ["db-migration", "registered skill: db-migration"], ["no-skill", "No registered skill matches; proceed without one"]),
+    options: opts(
+      ["code-review", "registered skill: code-review"],
+      ["test-runner", "registered skill: test-runner"],
+      ["doc-writer", "registered skill: doc-writer"],
+      ["db-migration", "registered skill: db-migration"],
+      ["no-skill", "No registered skill matches; proceed without one"],
+    ),
     reasonCodes: SKILL_REASONS,
     deterministic: noRule,
     label: labeled("no-skill", "a one-line rename needs no registered skill"),
@@ -895,13 +1454,23 @@ const SKILL: readonly Row[] = [
   },
   {
     domain: "skill-selection",
-    question: "Which available skill, if any, is relevant to the current state?",
+    question:
+      "Which available skill, if any, is relevant to the current state?",
     context: ["state:improve the error messages in the CLI"],
     ranked: false,
-    options: opts(["code-review", "registered skill: code-review"], ["test-runner", "registered skill: test-runner"], ["doc-writer", "registered skill: doc-writer"], ["db-migration", "registered skill: db-migration"], ["no-skill", "No registered skill matches; proceed without one"]),
+    options: opts(
+      ["code-review", "registered skill: code-review"],
+      ["test-runner", "registered skill: test-runner"],
+      ["doc-writer", "registered skill: doc-writer"],
+      ["db-migration", "registered skill: db-migration"],
+      ["no-skill", "No registered skill matches; proceed without one"],
+    ),
     reasonCodes: SKILL_REASONS,
     deterministic: noRule,
-    label: labeled("no-skill", "ordinary code editing matches no registered skill"),
+    label: labeled(
+      "no-skill",
+      "ordinary code editing matches no registered skill",
+    ),
     difficulty: "medium",
     source: "derived-production-spec",
     signals: signals("5-options", "competing-valid-actions"),
@@ -909,23 +1478,42 @@ const SKILL: readonly Row[] = [
   },
   {
     domain: "skill-selection",
-    question: "Which available skill, if any, is relevant to the current state?",
-    context: ["state:flaky integration test, intermittent failure, no local reproduction"],
+    question:
+      "Which available skill, if any, is relevant to the current state?",
+    context: [
+      "state:flaky integration test, intermittent failure, no local reproduction",
+    ],
     ranked: false,
-    options: opts(["code-review", "registered skill: code-review"], ["test-runner", "registered skill: test-runner"], ["doc-writer", "registered skill: doc-writer"], ["db-migration", "registered skill: db-migration"], ["no-skill", "No registered skill matches; proceed without one"]),
+    options: opts(
+      ["code-review", "registered skill: code-review"],
+      ["test-runner", "registered skill: test-runner"],
+      ["doc-writer", "registered skill: doc-writer"],
+      ["db-migration", "registered skill: db-migration"],
+      ["no-skill", "No registered skill matches; proceed without one"],
+    ),
     reasonCodes: SKILL_REASONS,
     deterministic: noRule,
-    label: labeled("test-runner", "the test skill owns flaky-test investigation"),
+    label: labeled(
+      "test-runner",
+      "the test skill owns flaky-test investigation",
+    ),
     difficulty: "medium",
     source: "derived-production-spec",
     signals: signals("5-options", "competing-valid-actions"),
   },
   {
     domain: "skill-selection",
-    question: "Which available skill, if any, is relevant to the current state?",
+    question:
+      "Which available skill, if any, is relevant to the current state?",
     context: ["state:version bump and changelog for a release"],
     ranked: false,
-    options: opts(["code-review", "registered skill: code-review"], ["test-runner", "registered skill: test-runner"], ["doc-writer", "registered skill: doc-writer"], ["db-migration", "registered skill: db-migration"], ["no-skill", "No registered skill matches; proceed without one"]),
+    options: opts(
+      ["code-review", "registered skill: code-review"],
+      ["test-runner", "registered skill: test-runner"],
+      ["doc-writer", "registered skill: doc-writer"],
+      ["db-migration", "registered skill: db-migration"],
+      ["no-skill", "No registered skill matches; proceed without one"],
+    ),
     reasonCodes: SKILL_REASONS,
     deterministic: noRule,
     label: labeled("doc-writer", "changelog authoring is documentation work"),
@@ -936,10 +1524,17 @@ const SKILL: readonly Row[] = [
   },
   {
     domain: "skill-selection",
-    question: "Which available skill, if any, is relevant to the current state?",
+    question:
+      "Which available skill, if any, is relevant to the current state?",
     context: ["state:review comments on a PR from last month"],
     ranked: false,
-    options: opts(["code-review", "registered skill: code-review"], ["test-runner", "registered skill: test-runner"], ["doc-writer", "registered skill: doc-writer"], ["db-migration", "registered skill: db-migration"], ["no-skill", "No registered skill matches; proceed without one"]),
+    options: opts(
+      ["code-review", "registered skill: code-review"],
+      ["test-runner", "registered skill: test-runner"],
+      ["doc-writer", "registered skill: doc-writer"],
+      ["db-migration", "registered skill: db-migration"],
+      ["no-skill", "No registered skill matches; proceed without one"],
+    ),
     reasonCodes: SKILL_REASONS,
     deterministic: noRule,
     label: labeled("code-review", "addressing review comments is review work"),
@@ -949,13 +1544,23 @@ const SKILL: readonly Row[] = [
   },
   {
     domain: "skill-selection",
-    question: "Which available skill, if any, is relevant to the current state?",
+    question:
+      "Which available skill, if any, is relevant to the current state?",
     context: ["state:stale lock file after a dependency change"],
     ranked: false,
-    options: opts(["code-review", "registered skill: code-review"], ["test-runner", "registered skill: test-runner"], ["doc-writer", "registered skill: doc-writer"], ["db-migration", "registered skill: db-migration"], ["no-skill", "No registered skill matches; proceed without one"]),
+    options: opts(
+      ["code-review", "registered skill: code-review"],
+      ["test-runner", "registered skill: test-runner"],
+      ["doc-writer", "registered skill: doc-writer"],
+      ["db-migration", "registered skill: db-migration"],
+      ["no-skill", "No registered skill matches; proceed without one"],
+    ),
     reasonCodes: SKILL_REASONS,
     deterministic: noRule,
-    label: labeled("no-skill", "dependency housekeeping matches no registered skill"),
+    label: labeled(
+      "no-skill",
+      "dependency housekeeping matches no registered skill",
+    ),
     difficulty: "medium",
     source: "derived-production-spec",
     signals: signals("5-options"),
@@ -979,12 +1584,23 @@ const CONTEXT: readonly Row[] = [
   {
     domain: "context-selection",
     question: "Should this context candidate be kept, dropped, or compressed?",
-    context: ["task:extend the decision engine's validation", "candidate:src/decisions/engine.ts", "budget:8000 tokens"],
+    context: [
+      "task:extend the decision engine's validation",
+      "candidate:src/decisions/engine.ts",
+      "budget:8000 tokens",
+    ],
     ranked: false,
-    options: opts(["keep", "Keep the candidate in context"], ["drop", "Drop the candidate from context"], ["compress", "Keep a compressed form of the candidate"]),
+    options: opts(
+      ["keep", "Keep the candidate in context"],
+      ["drop", "Drop the candidate from context"],
+      ["compress", "Keep a compressed form of the candidate"],
+    ),
     reasonCodes: CONTEXT_REASONS,
     deterministic: noRule,
-    label: labeled("keep", "the file being edited is unconditionally in context"),
+    label: labeled(
+      "keep",
+      "the file being edited is unconditionally in context",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("3-options"),
@@ -992,12 +1608,23 @@ const CONTEXT: readonly Row[] = [
   {
     domain: "context-selection",
     question: "Should this context candidate be kept, dropped, or compressed?",
-    context: ["task:extend the decision engine's validation", "candidate:src/models/model.ts", "budget:8000 tokens"],
+    context: [
+      "task:extend the decision engine's validation",
+      "candidate:src/models/model.ts",
+      "budget:8000 tokens",
+    ],
     ranked: false,
-    options: opts(["keep", "Keep the candidate in context"], ["drop", "Drop the candidate from context"], ["compress", "Keep a compressed form of the candidate"]),
+    options: opts(
+      ["keep", "Keep the candidate in context"],
+      ["drop", "Drop the candidate from context"],
+      ["compress", "Keep a compressed form of the candidate"],
+    ),
     reasonCodes: CONTEXT_REASONS,
     deterministic: noRule,
-    label: labeled("drop", "the model registry is unrelated to decision validation"),
+    label: labeled(
+      "drop",
+      "the model registry is unrelated to decision validation",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("3-options"),
@@ -1005,12 +1632,23 @@ const CONTEXT: readonly Row[] = [
   {
     domain: "context-selection",
     question: "Should this context candidate be kept, dropped, or compressed?",
-    context: ["task:extend the decision engine's validation", "candidate:src/decisions/provider.ts", "budget:8000 tokens"],
+    context: [
+      "task:extend the decision engine's validation",
+      "candidate:src/decisions/provider.ts",
+      "budget:8000 tokens",
+    ],
     ranked: false,
-    options: opts(["keep", "Keep the candidate in context"], ["drop", "Drop the candidate from context"], ["compress", "Keep a compressed form of the candidate"]),
+    options: opts(
+      ["keep", "Keep the candidate in context"],
+      ["drop", "Drop the candidate from context"],
+      ["compress", "Keep a compressed form of the candidate"],
+    ),
     reasonCodes: CONTEXT_REASONS,
     deterministic: noRule,
-    label: labeled("keep", "the provider port is the contract being validated against"),
+    label: labeled(
+      "keep",
+      "the provider port is the contract being validated against",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("3-options"),
@@ -1018,12 +1656,23 @@ const CONTEXT: readonly Row[] = [
   {
     domain: "context-selection",
     question: "Should this context candidate be kept, dropped, or compressed?",
-    context: ["task:extend the decision engine's validation", "candidate:docs/architecture/DECISIONS.md", "budget:8000 tokens"],
+    context: [
+      "task:extend the decision engine's validation",
+      "candidate:docs/architecture/DECISIONS.md",
+      "budget:8000 tokens",
+    ],
     ranked: false,
-    options: opts(["keep", "Keep the candidate in context"], ["drop", "Drop the candidate from context"], ["compress", "Keep a compressed form of the candidate"]),
+    options: opts(
+      ["keep", "Keep the candidate in context"],
+      ["drop", "Drop the candidate from context"],
+      ["compress", "Keep a compressed form of the candidate"],
+    ),
     reasonCodes: CONTEXT_REASONS,
     deterministic: noRule,
-    label: labeled("compress", "the ADR record is useful as summaries (ADR-051/052/053) but full text is too large"),
+    label: labeled(
+      "compress",
+      "the ADR record is useful as summaries (ADR-051/052/053) but full text is too large",
+    ),
     difficulty: "hard",
     source: "derived-production-spec",
     signals: signals("3-options", "competing-valid-actions", "budget-pressure"),
@@ -1032,9 +1681,17 @@ const CONTEXT: readonly Row[] = [
   {
     domain: "context-selection",
     question: "Should this context candidate be kept, dropped, or compressed?",
-    context: ["task:extend the decision engine's validation", "candidate:src/decisions/engine.ts.bak", "budget:8000 tokens"],
+    context: [
+      "task:extend the decision engine's validation",
+      "candidate:src/decisions/engine.ts.bak",
+      "budget:8000 tokens",
+    ],
     ranked: false,
-    options: opts(["keep", "Keep the candidate in context"], ["drop", "Drop the candidate from context"], ["compress", "Keep a compressed form of the candidate"]),
+    options: opts(
+      ["keep", "Keep the candidate in context"],
+      ["drop", "Drop the candidate from context"],
+      ["compress", "Keep a compressed form of the candidate"],
+    ),
     reasonCodes: CONTEXT_REASONS,
     deterministic: noRule,
     label: labeled("drop", "a backup copy duplicates the kept source file"),
@@ -1045,12 +1702,23 @@ const CONTEXT: readonly Row[] = [
   {
     domain: "context-selection",
     question: "Should this context candidate be kept, dropped, or compressed?",
-    context: ["task:extend the decision engine's validation", "candidate:docs/deprecated/decision-engine-v1.md", "budget:8000 tokens"],
+    context: [
+      "task:extend the decision engine's validation",
+      "candidate:docs/deprecated/decision-engine-v1.md",
+      "budget:8000 tokens",
+    ],
     ranked: false,
-    options: opts(["keep", "Keep the candidate in context"], ["drop", "Drop the candidate from context"], ["compress", "Keep a compressed form of the candidate"]),
+    options: opts(
+      ["keep", "Keep the candidate in context"],
+      ["drop", "Drop the candidate from context"],
+      ["compress", "Keep a compressed form of the candidate"],
+    ),
     reasonCodes: CONTEXT_REASONS,
     deterministic: noRule,
-    label: labeled("drop", "a superseded design doc misdescribes the current engine"),
+    label: labeled(
+      "drop",
+      "a superseded design doc misdescribes the current engine",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("3-options", "stale-or-superseded"),
@@ -1058,12 +1726,23 @@ const CONTEXT: readonly Row[] = [
   {
     domain: "context-selection",
     question: "Should this context candidate be kept, dropped, or compressed?",
-    context: ["task:extend the decision engine's validation", "candidate:tests/unit/decision-engine.test.ts", "budget:4000 tokens"],
+    context: [
+      "task:extend the decision engine's validation",
+      "candidate:tests/unit/decision-engine.test.ts",
+      "budget:4000 tokens",
+    ],
     ranked: false,
-    options: opts(["keep", "Keep the candidate in context"], ["drop", "Drop the candidate from context"], ["compress", "Keep a compressed form of the candidate"]),
+    options: opts(
+      ["keep", "Keep the candidate in context"],
+      ["drop", "Drop the candidate from context"],
+      ["compress", "Keep a compressed form of the candidate"],
+    ),
     reasonCodes: CONTEXT_REASONS,
     deterministic: noRule,
-    label: labeled("compress", "the test file shows expected behaviour but exceeds the tight budget in full"),
+    label: labeled(
+      "compress",
+      "the test file shows expected behaviour but exceeds the tight budget in full",
+    ),
     difficulty: "medium",
     source: "derived-production-spec",
     signals: signals("3-options", "budget-pressure"),
@@ -1071,9 +1750,17 @@ const CONTEXT: readonly Row[] = [
   {
     domain: "context-selection",
     question: "Should this context candidate be kept, dropped, or compressed?",
-    context: ["task:extend the decision engine's validation", "candidate:package-lock.json", "budget:8000 tokens"],
+    context: [
+      "task:extend the decision engine's validation",
+      "candidate:package-lock.json",
+      "budget:8000 tokens",
+    ],
     ranked: false,
-    options: opts(["keep", "Keep the candidate in context"], ["drop", "Drop the candidate from context"], ["compress", "Keep a compressed form of the candidate"]),
+    options: opts(
+      ["keep", "Keep the candidate in context"],
+      ["drop", "Drop the candidate from context"],
+      ["compress", "Keep a compressed form of the candidate"],
+    ),
     reasonCodes: CONTEXT_REASONS,
     deterministic: noRule,
     label: labeled("drop", "the lockfile is unrelated to the change"),
@@ -1084,12 +1771,23 @@ const CONTEXT: readonly Row[] = [
   {
     domain: "context-selection",
     question: "Should this context candidate be kept, dropped, or compressed?",
-    context: ["task:extend the decision engine's validation", "candidate:src/decisions/validate.ts", "budget:8000 tokens"],
+    context: [
+      "task:extend the decision engine's validation",
+      "candidate:src/decisions/validate.ts",
+      "budget:8000 tokens",
+    ],
     ranked: false,
-    options: opts(["keep", "Keep the candidate in context"], ["drop", "Drop the candidate from context"], ["compress", "Keep a compressed form of the candidate"]),
+    options: opts(
+      ["keep", "Keep the candidate in context"],
+      ["drop", "Drop the candidate from context"],
+      ["compress", "Keep a compressed form of the candidate"],
+    ),
     reasonCodes: CONTEXT_REASONS,
     deterministic: noRule,
-    label: labeled("keep", "the validator is the module the engine delegates to"),
+    label: labeled(
+      "keep",
+      "the validator is the module the engine delegates to",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("3-options"),
@@ -1097,12 +1795,23 @@ const CONTEXT: readonly Row[] = [
   {
     domain: "context-selection",
     question: "Should this context candidate be kept, dropped, or compressed?",
-    context: ["task:extend the decision engine's validation", "candidate:AGENTS.md", "budget:8000 tokens"],
+    context: [
+      "task:extend the decision engine's validation",
+      "candidate:AGENTS.md",
+      "budget:8000 tokens",
+    ],
     ranked: false,
-    options: opts(["keep", "Keep the candidate in context"], ["drop", "Drop the candidate from context"], ["compress", "Keep a compressed form of the candidate"]),
+    options: opts(
+      ["keep", "Keep the candidate in context"],
+      ["drop", "Drop the candidate from context"],
+      ["compress", "Keep a compressed form of the candidate"],
+    ),
     reasonCodes: CONTEXT_REASONS,
     deterministic: noRule,
-    label: labeled("compress", "the agent contract governs conduct and is worth its summary, not its full text"),
+    label: labeled(
+      "compress",
+      "the agent contract governs conduct and is worth its summary, not its full text",
+    ),
     difficulty: "medium",
     source: "derived-production-spec",
     signals: signals("3-options", "competing-valid-actions"),
@@ -1126,23 +1835,46 @@ const STRATEGY_REASONS = [
 const STRATEGY: readonly Row[] = [
   {
     domain: "execution-strategy",
-    question: 'Should this low-risk task be completed deterministically, executed with a model, or handed to a human?',
-    context: ["risk:low", "model-required:false", "eligible-models:0", "capabilities:none"],
+    question:
+      "Should this low-risk task be completed deterministically, executed with a model, or handed to a human?",
+    context: [
+      "risk:low",
+      "model-required:false",
+      "eligible-models:0",
+      "capabilities:none",
+    ],
     ranked: false,
-    options: opts(["deterministic", "Complete it deterministically, with no model call"], ["model", "Execute it with a model through Frontier"], ["human", "Hand it to a human before spending anything"]),
+    options: opts(
+      ["deterministic", "Complete it deterministically, with no model call"],
+      ["model", "Execute it with a model through Frontier"],
+      ["human", "Hand it to a human before spending anything"],
+    ),
     reasonCodes: STRATEGY_REASONS,
     deterministic: clear("deterministic", "no-model-capability-required"),
-    label: labeled("deterministic", "the gate already answers: no model capability needed below high risk"),
+    label: labeled(
+      "deterministic",
+      "the gate already answers: no model capability needed below high risk",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("3-options", "deterministic-gate-covers"),
   },
   {
     domain: "execution-strategy",
-    question: 'Should this medium-risk task be completed deterministically, executed with a model, or handed to a human?',
-    context: ["risk:medium", "model-required:true", "eligible-models:3", "capabilities:reasoning+coding"],
+    question:
+      "Should this medium-risk task be completed deterministically, executed with a model, or handed to a human?",
+    context: [
+      "risk:medium",
+      "model-required:true",
+      "eligible-models:3",
+      "capabilities:reasoning+coding",
+    ],
     ranked: false,
-    options: opts(["deterministic", "Complete it deterministically, with no model call"], ["model", "Execute it with a model through Frontier"], ["human", "Hand it to a human before spending anything"]),
+    options: opts(
+      ["deterministic", "Complete it deterministically, with no model call"],
+      ["model", "Execute it with a model through Frontier"],
+      ["human", "Hand it to a human before spending anything"],
+    ),
     reasonCodes: STRATEGY_REASONS,
     deterministic: clear("model", "eligible-model-available"),
     label: labeled("model", "the gate already answers: eligible models exist"),
@@ -1152,39 +1884,80 @@ const STRATEGY: readonly Row[] = [
   },
   {
     domain: "execution-strategy",
-    question: 'Should this high-risk task be completed deterministically, executed with a model, or handed to a human?',
-    context: ["risk:high", "model-required:true", "eligible-models:0", "capabilities:computerUse"],
+    question:
+      "Should this high-risk task be completed deterministically, executed with a model, or handed to a human?",
+    context: [
+      "risk:high",
+      "model-required:true",
+      "eligible-models:0",
+      "capabilities:computerUse",
+    ],
     ranked: false,
-    options: opts(["deterministic", "Complete it deterministically, with no model call"], ["model", "Execute it with a model through Frontier"], ["human", "Hand it to a human before spending anything"]),
+    options: opts(
+      ["deterministic", "Complete it deterministically, with no model call"],
+      ["model", "Execute it with a model through Frontier"],
+      ["human", "Hand it to a human before spending anything"],
+    ),
     reasonCodes: STRATEGY_REASONS,
     deterministic: clear("human", "no-eligible-model"),
-    label: labeled("human", "the gate already answers: nobody supplies the capability"),
+    label: labeled(
+      "human",
+      "the gate already answers: nobody supplies the capability",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("3-options", "deterministic-gate-covers"),
   },
   {
     domain: "execution-strategy",
-    question: 'Should this high-risk task be completed deterministically, executed with a model, or handed to a human?',
-    context: ["risk:high", "model-required:false", "eligible-models:0", "capabilities:none", "note:code could finish it silently"],
+    question:
+      "Should this high-risk task be completed deterministically, executed with a model, or handed to a human?",
+    context: [
+      "risk:high",
+      "model-required:false",
+      "eligible-models:0",
+      "capabilities:none",
+      "note:code could finish it silently",
+    ],
     ranked: false,
-    options: opts(["deterministic", "Complete it deterministically, with no model call"], ["model", "Execute it with a model through Frontier"], ["human", "Hand it to a human before spending anything"]),
+    options: opts(
+      ["deterministic", "Complete it deterministically, with no model call"],
+      ["model", "Execute it with a model through Frontier"],
+      ["human", "Hand it to a human before spending anything"],
+    ),
     reasonCodes: STRATEGY_REASONS,
     deterministic: noRule,
-    label: labeled("human", "high-risk work code could finish silently is the gate's documented provider-judgement case"),
+    label: labeled(
+      "human",
+      "high-risk work code could finish silently is the gate's documented provider-judgement case",
+    ),
     difficulty: "medium",
     source: "derived-production-spec",
     signals: signals("3-options", "risk-boundary"),
   },
   {
     domain: "execution-strategy",
-    question: 'Should this high-risk task be completed deterministically, executed with a model, or handed to a human?',
-    context: ["risk:high", "model-required:false", "eligible-models:0", "capabilities:none", "note:reversible documentation-only change in a critical area"],
+    question:
+      "Should this high-risk task be completed deterministically, executed with a model, or handed to a human?",
+    context: [
+      "risk:high",
+      "model-required:false",
+      "eligible-models:0",
+      "capabilities:none",
+      "note:reversible documentation-only change in a critical area",
+    ],
     ranked: false,
-    options: opts(["deterministic", "Complete it deterministically, with no model call"], ["model", "Execute it with a model through Frontier"], ["human", "Hand it to a human before spending anything"]),
+    options: opts(
+      ["deterministic", "Complete it deterministically, with no model call"],
+      ["model", "Execute it with a model through Frontier"],
+      ["human", "Hand it to a human before spending anything"],
+    ),
     reasonCodes: STRATEGY_REASONS,
     deterministic: noRule,
-    label: labeled("deterministic", "the change is reversible and documentation-only despite the critical area"),
+    label: labeled(
+      "deterministic",
+      "the change is reversible and documentation-only despite the critical area",
+    ),
     difficulty: "hard",
     source: "derived-production-spec",
     signals: signals("3-options", "risk-boundary", "competing-valid-actions"),
@@ -1192,13 +1965,27 @@ const STRATEGY: readonly Row[] = [
   },
   {
     domain: "execution-strategy",
-    question: 'Should this critical-risk task be completed deterministically, executed with a model, or handed to a human?',
-    context: ["risk:critical", "model-required:false", "eligible-models:0", "capabilities:none", "note:revert of a bad deploy script"],
+    question:
+      "Should this critical-risk task be completed deterministically, executed with a model, or handed to a human?",
+    context: [
+      "risk:critical",
+      "model-required:false",
+      "eligible-models:0",
+      "capabilities:none",
+      "note:revert of a bad deploy script",
+    ],
     ranked: false,
-    options: opts(["deterministic", "Complete it deterministically, with no model call"], ["model", "Execute it with a model through Frontier"], ["human", "Hand it to a human before spending anything"]),
+    options: opts(
+      ["deterministic", "Complete it deterministically, with no model call"],
+      ["model", "Execute it with a model through Frontier"],
+      ["human", "Hand it to a human before spending anything"],
+    ),
     reasonCodes: STRATEGY_REASONS,
     deterministic: noRule,
-    label: labeled("human", "critical-risk work should not auto-complete on an absent opinion"),
+    label: labeled(
+      "human",
+      "critical-risk work should not auto-complete on an absent opinion",
+    ),
     difficulty: "medium",
     source: "derived-production-spec",
     signals: signals("3-options", "risk-boundary"),
@@ -1343,12 +2130,21 @@ const TOOLS: readonly Row[] = [
   {
     domain: "tool-selection",
     question: "Which allowed tool should the runtime use for this task?",
-    context: ["need:list the workspace files before choosing a target", "candidates:2"],
+    context: [
+      "need:list the workspace files before choosing a target",
+      "candidates:2",
+    ],
     ranked: false,
-    options: opts(["list-workspace-files", "List workspace files"], ["read-selected-file", "Read the selected context file"]),
+    options: opts(
+      ["list-workspace-files", "List workspace files"],
+      ["read-selected-file", "Read the selected context file"],
+    ),
     reasonCodes: TOOL_REASONS,
     deterministic: noRule,
-    label: labeled("list-workspace-files", "enumeration is required before any read target exists"),
+    label: labeled(
+      "list-workspace-files",
+      "enumeration is required before any read target exists",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("2-options"),
@@ -1356,12 +2152,21 @@ const TOOLS: readonly Row[] = [
   {
     domain: "tool-selection",
     question: "Which allowed tool should the runtime use for this task?",
-    context: ["need:read the exact file named in the selected context", "candidates:2"],
+    context: [
+      "need:read the exact file named in the selected context",
+      "candidates:2",
+    ],
     ranked: false,
-    options: opts(["list-workspace-files", "List workspace files"], ["read-selected-file", "Read the selected context file"]),
+    options: opts(
+      ["list-workspace-files", "List workspace files"],
+      ["read-selected-file", "Read the selected context file"],
+    ),
     reasonCodes: TOOL_REASONS,
     deterministic: noRule,
-    label: labeled("read-selected-file", "the target is already known; reading beats enumerating"),
+    label: labeled(
+      "read-selected-file",
+      "the target is already known; reading beats enumerating",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("2-options"),
@@ -1371,10 +2176,16 @@ const TOOLS: readonly Row[] = [
     question: "Which allowed tool should the runtime use for this task?",
     context: ["need:verify a specific file's current content", "candidates:2"],
     ranked: false,
-    options: opts(["list-workspace-files", "List workspace files"], ["read-selected-file", "Read the selected context file"]),
+    options: opts(
+      ["list-workspace-files", "List workspace files"],
+      ["read-selected-file", "Read the selected context file"],
+    ),
     reasonCodes: TOOL_REASONS,
     deterministic: noRule,
-    label: labeled("read-selected-file", "content verification is a read, not an enumeration"),
+    label: labeled(
+      "read-selected-file",
+      "content verification is a read, not an enumeration",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("2-options"),
@@ -1384,7 +2195,10 @@ const TOOLS: readonly Row[] = [
     question: "Which allowed tool should the runtime use for this task?",
     context: ["need:discover what changed since the last run", "candidates:2"],
     ranked: false,
-    options: opts(["list-workspace-files", "List workspace files"], ["read-selected-file", "Read the selected context file"]),
+    options: opts(
+      ["list-workspace-files", "List workspace files"],
+      ["read-selected-file", "Read the selected context file"],
+    ),
     reasonCodes: TOOL_REASONS,
     deterministic: noRule,
     label: noLabel,
@@ -1399,7 +2213,10 @@ const TOOLS: readonly Row[] = [
     options: opts(["read-selected-file", "Read the selected context file"]),
     reasonCodes: TOOL_REASONS,
     deterministic: clear("read-selected-file", "single-allowed-tool"),
-    label: labeled("read-selected-file", "the gate already answers: one allowed tool"),
+    label: labeled(
+      "read-selected-file",
+      "the gate already answers: one allowed tool",
+    ),
     difficulty: "easy",
     source: "derived-production-spec",
     signals: signals("1-option", "deterministic-gate-covers"),
@@ -1425,7 +2242,10 @@ interface GridCase {
   readonly spec: DomainDecisionSpec;
 }
 
-function gridFromSpec(domain: DecisionDomain, spec: DomainDecisionSpec): GridCase {
+function gridFromSpec(
+  domain: DecisionDomain,
+  spec: DomainDecisionSpec,
+): GridCase {
   return { domain, spec };
 }
 
@@ -1583,10 +2403,12 @@ const GRID_CASES: readonly GridCase[] = (() => {
      authored states verbatim: they are tagged synthetic-authored (like all
      grid rows) and the duplicate accounting reports the overlap honestly. */
   for (const row of RELEVANCE) {
-    const primary = row.context[0]?.replace("task:work in ", "") ?? "src/decisions/engine.ts";
+    const primary =
+      row.context[0]?.replace("task:work in ", "") ?? "src/decisions/engine.ts";
     const candidate =
-      row.context.find((entry) => entry.startsWith("candidate:"))?.slice("candidate:".length) ??
-      "src/decisions/engine.ts";
+      row.context
+        .find((entry) => entry.startsWith("candidate:"))
+        ?.slice("candidate:".length) ?? "src/decisions/engine.ts";
     rows.push(
       gridFromSpec(
         "relevance",
@@ -1732,32 +2554,30 @@ function nextIndex(domain: string): number {
  * slice mined from the repo's own decision test suites.
  */
 export const BENCHMARK_CASES: readonly DecisionBenchmarkCase[] = [
-  ...ROWS.map(
-    (row) => {
-      const domain = row.domain as DecisionBenchmarkCase["domain"];
-      const index = nextIndex(row.domain);
-      const label: EvaluationLabel = row.label;
-      return {
-        caseId: stableCaseId(domain, index, row.question, row.context),
-        domain,
-        state: {
-          question: row.question,
-          context: row.context,
-          ranked: row.ranked,
-        },
-        options: row.options,
-        reasonCodes: row.reasonCodes,
-        deterministicExpectation: row.deterministic,
-        evaluationLabel: label,
-        source: row.source ?? "synthetic-authored",
-        difficulty: row.difficulty,
-        ...(row.note === undefined ? {} : { labelNote: row.note }),
-        metadata: {
-          signals: row.signals ?? noSignals,
-        },
-      };
-    },
-  ),
+  ...ROWS.map((row) => {
+    const domain = row.domain as DecisionBenchmarkCase["domain"];
+    const index = nextIndex(row.domain);
+    const label: EvaluationLabel = row.label;
+    return {
+      caseId: stableCaseId(domain, index, row.question, row.context),
+      domain,
+      state: {
+        question: row.question,
+        context: row.context,
+        ranked: row.ranked,
+      },
+      options: row.options,
+      reasonCodes: row.reasonCodes,
+      deterministicExpectation: row.deterministic,
+      evaluationLabel: label,
+      source: row.source ?? "synthetic-authored",
+      difficulty: row.difficulty,
+      ...(row.note === undefined ? {} : { labelNote: row.note }),
+      metadata: {
+        signals: row.signals ?? noSignals,
+      },
+    };
+  }),
   ...TEST_DERIVED_CASES,
 ];
 

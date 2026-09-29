@@ -8,8 +8,10 @@ import {
   assertOneOf,
   assertPositiveInteger,
   assertStringArray,
+  assertUnitInterval,
 } from "../../core/validation.js";
 import { parsePathPattern } from "../../context/ignore.js";
+import { DEFAULT_COMPLETION_CONFIDENCE_THRESHOLD } from "../../decisions/domains.js";
 import {
   type AccessPolicy,
   assertAccessPolicy,
@@ -261,6 +263,19 @@ interface DecisionLimits {
    * unpriced elsewhere rather than silently treated as free.
    */
   readonly maxDecisionCostMicrosPerTask?: number;
+  /**
+   * Confidence below which a `complete` completion verdict is withheld.
+   *
+   * Completion is the one assessment whose answer removes a human from the loop, so it
+   * is the one that is gated: a verdict below this number is downgraded to `uncertain`
+   * and a human decision is required (see `gateCompletionAssessment`). The default is
+   * the conventional high/medium boundary, and this is a *policy* number — it belongs
+   * to whoever owns the consequences, so it is configuration rather than a constant.
+   *
+   * A verdict that reports no confidence is not gated at all: absence is not a low
+   * value, and this platform never reads it as one (ADR-035).
+   */
+  readonly minCompletionConfidence?: number;
 }
 
 export type DecisionConfig =
@@ -294,6 +309,7 @@ export const DEFAULT_DECISION_CONFIG: DecisionConfig = {
   provider: "disabled",
   maxDecisionsPerTask: 24,
   maxRetriesPerTask: 1,
+  minCompletionConfidence: DEFAULT_COMPLETION_CONFIDENCE_THRESHOLD,
 };
 
 export function assertDecisionConfig(
@@ -331,9 +347,18 @@ export function assertDecisionConfig(
     `${field}.maxDecisionCostMicrosPerTask`,
     1_000_000_000,
   );
+  // Always resolved, never left absent: a completion gate that silently disappeared
+  // when its threshold was omitted would be a safety invariant that depends on someone
+  // remembering to declare it.
+  const minCompletionConfidence = assertUnitInterval(
+    candidate["minCompletionConfidence"] ??
+      DEFAULT_DECISION_CONFIG.minCompletionConfidence,
+    `${field}.minCompletionConfidence`,
+  );
   const limits: DecisionLimits = {
     maxDecisionsPerTask: maxDecisionsPerTask ?? 1,
     maxRetriesPerTask: maxRetriesPerTask ?? 0,
+    minCompletionConfidence,
     ...(maxDecisionCostMicrosPerTask === undefined
       ? {}
       : { maxDecisionCostMicrosPerTask }),
@@ -943,6 +968,256 @@ export function assertContextConfig(
   };
 }
 
+/**
+ * Agent-runner configuration: which bounded runtime executes an attempt, and the
+ * one verification command it may run.
+ *
+ * Absent means the offline `simulated` runner, so every configuration written
+ * before this existed keeps its exact behaviour. Selecting `change-set` is an
+ * explicit operator decision that lets a model's proposal become workspace writes
+ * — through the `OperationGateway`, never around it.
+ *
+ * Nothing here grants authority. The command named is only *runnable* if
+ * `policy.process.allowedCommands` lists it and `policy.capabilities.allowed`
+ * includes `process.execute`; the writable roots and `filesystem.write` capability
+ * come from the policy, not from this block.
+ */
+export const AGENT_RUNNER_KINDS = ["simulated", "change-set"] as const;
+export type AgentRunnerKind = (typeof AGENT_RUNNER_KINDS)[number];
+
+export interface AgentVerificationCheckConfig {
+  /**
+   * Stable, operator-declared check identity. Authored here and referenced by a
+   * criterion, never derived from command output, position or timing.
+   */
+  readonly id: string;
+  /** Program name or workspace-relative path. argv only; there is no shell. */
+  readonly command: string;
+  readonly args: readonly string[];
+  /** Workspace-relative working directory. Defaults to the workspace root. */
+  readonly cwdRef?: string;
+  readonly timeoutMs?: number;
+}
+
+export interface AgentVerificationConfig {
+  /**
+   * Program name or workspace-relative path. argv only; there is no shell.
+   *
+   * Optional since named checks exist: a project may declare only `checks`. When
+   * present it is the whole-suite verification, reported without a check id.
+   */
+  readonly command?: string;
+  readonly args?: readonly string[];
+  /** Workspace-relative working directory. Defaults to the workspace root. */
+  readonly cwdRef?: string;
+  readonly timeoutMs?: number;
+  /**
+   * Named checks, each run and reported under its own id. Additive to the whole-suite
+   * command: a run may record both. Declaring a check grants no new authority — every
+   * one still passes through policy, capability and the sandbox.
+   */
+  readonly checks?: readonly AgentVerificationCheckConfig[];
+}
+
+export interface AgentConfig {
+  readonly runner: AgentRunnerKind;
+  /** The focused verification command the runner may run. */
+  readonly verification?: AgentVerificationConfig;
+  /** Per-file proposal cap. Defaults to the runner's own bound. */
+  readonly maxWriteBytes?: number;
+  /** Whole-change-set proposal cap. */
+  readonly maxChangeSetBytes?: number;
+  /** Largest number of files one proposal may name. */
+  readonly maxChangeSetFiles?: number;
+}
+
+export const DEFAULT_AGENT_CONFIG: AgentConfig = { runner: "simulated" };
+
+export const MAX_AGENT_WRITE_BYTES = 8_388_608;
+export const MAX_AGENT_CHANGE_SET_BYTES = 33_554_432;
+export const MAX_AGENT_CHANGE_SET_FILES = 256;
+
+/**
+ * Parses the optional `agent` block.
+ *
+ * Returns `undefined` when absent so an existing configuration is never rewritten
+ * with a block it did not have — absence keeps meaning "simulated".
+ */
+export function assertAgentConfig(
+  value: unknown,
+  field = "config.agent",
+): AgentConfig | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new DomainError("VALIDATION", `${field} must be an object`, {
+      field,
+    });
+  }
+  const candidate = value as Record<string, unknown>;
+  const runner = assertOneOf(
+    candidate["runner"] ?? DEFAULT_AGENT_CONFIG.runner,
+    AGENT_RUNNER_KINDS,
+    `${field}.runner`,
+  );
+
+  const verification = (() => {
+    const raw = candidate["verification"];
+    if (raw === undefined) {
+      return undefined;
+    }
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      throw new DomainError(
+        "VALIDATION",
+        `${field}.verification must be an object`,
+        {
+          field: `${field}.verification`,
+        },
+      );
+    }
+    const record = raw as Record<string, unknown>;
+    const command =
+      record["command"] === undefined
+        ? undefined
+        : assertNonEmptyString(
+            record["command"],
+            `${field}.verification.command`,
+          );
+    if (command !== undefined) {
+      assertNoSecretLikeValue(command, `${field}.verification.command`);
+    }
+    const args =
+      record["args"] === undefined
+        ? []
+        : assertStringArray(record["args"], `${field}.verification.args`);
+    args.forEach((arg, index) =>
+      assertNoSecretLikeValue(arg, `${field}.verification.args[${index}]`),
+    );
+    const cwdRef =
+      record["cwdRef"] === undefined
+        ? undefined
+        : assertNonEmptyString(
+            record["cwdRef"],
+            `${field}.verification.cwdRef`,
+          );
+    const timeoutMs = assertOptionalBoundedInteger(
+      record["timeoutMs"],
+      `${field}.verification.timeoutMs`,
+      MAX_LLM_TIMEOUT_MS,
+    );
+    // Named checks. Each id must be unique: two checks sharing an id would make a
+    // `verifiedBy.check` binding ambiguous, which is exactly the kind of quiet
+    // mis-attribution a criterion-specific mechanism must not allow.
+    const checks = (() => {
+      const rawChecks = record["checks"];
+      if (rawChecks === undefined) {
+        return undefined;
+      }
+      if (!Array.isArray(rawChecks)) {
+        throw new DomainError(
+          "VALIDATION",
+          `${field}.verification.checks must be an array`,
+          { field: `${field}.verification.checks` },
+        );
+      }
+      const seen = new Set<string>();
+      return rawChecks.map((entry, index) => {
+        const at = `${field}.verification.checks[${index}]`;
+        if (
+          typeof entry !== "object" ||
+          entry === null ||
+          Array.isArray(entry)
+        ) {
+          throw new DomainError("VALIDATION", `${at} must be an object`, {
+            field: at,
+          });
+        }
+        const check = entry as Record<string, unknown>;
+        const id = assertNonEmptyString(check["id"], `${at}.id`);
+        assertNoSecretLikeValue(id, `${at}.id`);
+        if (seen.has(id)) {
+          throw new DomainError(
+            "VALIDATION",
+            `${at}.id "${id}" is declared more than once`,
+            { field: `${at}.id` },
+          );
+        }
+        seen.add(id);
+        const checkCommand = assertNonEmptyString(
+          check["command"],
+          `${at}.command`,
+        );
+        assertNoSecretLikeValue(checkCommand, `${at}.command`);
+        const checkArgs = assertStringArray(check["args"] ?? [], `${at}.args`);
+        checkArgs.forEach((arg, argIndex) =>
+          assertNoSecretLikeValue(arg, `${at}.args[${argIndex}]`),
+        );
+        const checkCwdRef =
+          check["cwdRef"] === undefined
+            ? undefined
+            : assertNonEmptyString(check["cwdRef"], `${at}.cwdRef`);
+        const checkTimeoutMs = assertOptionalBoundedInteger(
+          check["timeoutMs"],
+          `${at}.timeoutMs`,
+          MAX_LLM_TIMEOUT_MS,
+        );
+        return {
+          id,
+          command: checkCommand,
+          args: checkArgs,
+          ...(checkCwdRef === undefined ? {} : { cwdRef: checkCwdRef }),
+          ...(checkTimeoutMs === undefined
+            ? {}
+            : { timeoutMs: checkTimeoutMs }),
+        } satisfies AgentVerificationCheckConfig;
+      });
+    })();
+
+    if (
+      command === undefined &&
+      (checks === undefined || checks.length === 0)
+    ) {
+      throw new DomainError(
+        "VALIDATION",
+        `${field}.verification must declare a command or at least one check`,
+        { field: `${field}.verification` },
+      );
+    }
+
+    return {
+      ...(command === undefined ? {} : { command, args }),
+      ...(cwdRef === undefined ? {} : { cwdRef }),
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      ...(checks === undefined ? {} : { checks }),
+    } satisfies AgentVerificationConfig;
+  })();
+
+  const maxWriteBytes = assertOptionalBoundedInteger(
+    candidate["maxWriteBytes"],
+    `${field}.maxWriteBytes`,
+    MAX_AGENT_WRITE_BYTES,
+  );
+  const maxChangeSetBytes = assertOptionalBoundedInteger(
+    candidate["maxChangeSetBytes"],
+    `${field}.maxChangeSetBytes`,
+    MAX_AGENT_CHANGE_SET_BYTES,
+  );
+  const maxChangeSetFiles = assertOptionalBoundedInteger(
+    candidate["maxChangeSetFiles"],
+    `${field}.maxChangeSetFiles`,
+    MAX_AGENT_CHANGE_SET_FILES,
+  );
+
+  return {
+    runner,
+    ...(verification === undefined ? {} : { verification }),
+    ...(maxWriteBytes === undefined ? {} : { maxWriteBytes }),
+    ...(maxChangeSetBytes === undefined ? {} : { maxChangeSetBytes }),
+    ...(maxChangeSetFiles === undefined ? {} : { maxChangeSetFiles }),
+  };
+}
+
 export interface ProjectConfig {
   readonly schemaVersion: typeof PROJECT_CONFIG_SCHEMA_VERSION;
   readonly project: Project;
@@ -975,6 +1250,14 @@ export interface ProjectConfig {
    * before Phase H therefore keeps working unchanged.
    */
   readonly frontier: FrontierConfig;
+  /**
+   * The agent runner and its verification command.
+   *
+   * Absent means the offline `simulated` runner, so no pre-existing configuration
+   * changes behaviour. Present only when an operator has deliberately chosen a
+   * runner that can produce workspace writes.
+   */
+  readonly agent?: AgentConfig;
 }
 
 export function assertProjectConfig(value: unknown): ProjectConfig {
@@ -1063,6 +1346,9 @@ export function assertProjectConfig(value: unknown): ProjectConfig {
     candidate["frontier"],
     "config.frontier",
   );
+  // Absent means the simulated runner: an existing configuration is never rewritten
+  // with a block it did not have.
+  const agent = assertAgentConfig(candidate["agent"], "config.agent");
   return {
     schemaVersion: PROJECT_CONFIG_SCHEMA_VERSION,
     project,
@@ -1073,6 +1359,7 @@ export function assertProjectConfig(value: unknown): ProjectConfig {
     policy,
     decision,
     frontier,
+    ...(agent === undefined ? {} : { agent }),
   };
 }
 

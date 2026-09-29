@@ -55,7 +55,9 @@ function bodyOf(
         controller.error(piece);
         return;
       }
-      controller.enqueue(typeof piece === "string" ? encoder.encode(piece) : piece);
+      controller.enqueue(
+        typeof piece === "string" ? encoder.encode(piece) : piece,
+      );
     },
   });
 }
@@ -98,7 +100,9 @@ function transportWith(
   });
 }
 
-async function failureOf(call: () => Promise<unknown>): Promise<HttpTransportError> {
+async function failureOf(
+  call: () => Promise<unknown>,
+): Promise<HttpTransportError> {
   const outcome = await call().then(
     () => undefined,
     (caught: unknown) => caught,
@@ -176,7 +180,7 @@ describe("fetch transport: buffered", () => {
     const serialised = `${failure.message} ${JSON.stringify(failure.details)}`;
     expect(serialised).not.toContain(SECRET);
     expect(serialised).not.toContain("authorization");
-    expect(serialised).not.toContain("fixture\""); // no body fragment either
+    expect(serialised).not.toContain('fixture"'); // no body fragment either
   });
 
   it("classifies a socket failure as a network failure", async () => {
@@ -270,14 +274,18 @@ describe("fetch transport: streaming", () => {
   });
 
   it("treats a 2xx with no body as a network failure", async () => {
-    const transport = transportWith(fakeResponse({ status: 200, bodyStream: null }));
+    const transport = transportWith(
+      fakeResponse({ status: 200, bodyStream: null }),
+    );
     const failure = await failureOf(() => streaming(transport)(REQUEST));
     expect(failure.failureKind).toBe("network");
   });
 
   it("keeps the credential out of a streaming failure", async () => {
     const transport = transportWith(
-      fakeResponse({ bodyStream: bodyOf([namedError("TypeError", "terminated")]) }),
+      fakeResponse({
+        bodyStream: bodyOf([namedError("TypeError", "terminated")]),
+      }),
     );
 
     const stream = await streaming(transport)(REQUEST);

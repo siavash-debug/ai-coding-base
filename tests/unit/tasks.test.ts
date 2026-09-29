@@ -15,8 +15,10 @@ import {
   type Task,
   type VerificationLevel,
   acceptanceSummary,
+  assessAcceptanceCriteria,
   createTask,
   markAcceptanceCriterion,
+  measuredAcceptanceCriteriaMet,
   transitionTask,
   validateTask,
 } from "../../src/tasks/task.js";
@@ -317,6 +319,444 @@ describe("acceptance criteria", () => {
   });
 });
 
+describe("measuredAcceptanceCriteriaMet", () => {
+  it("reports nothing while every criterion is still unmeasured", () => {
+    // "not measured" must never be sent as "zero met": the completion contract
+    // treats the two as different facts (decisions/domains.ts).
+    const { task } = createHarness({
+      task: { acceptanceCriteria: ["a", "b", "c"] },
+    });
+    expect(measuredAcceptanceCriteriaMet(task)).toBeUndefined();
+  });
+
+  it("reports nothing for a task with no criteria at all", () => {
+    const { task } = createHarness();
+    expect(
+      measuredAcceptanceCriteriaMet({ ...task, acceptanceCriteria: [] }),
+    ).toBeUndefined();
+  });
+
+  it("reports the satisfied count once a criterion has been assessed", () => {
+    const { task, clock } = createHarness({
+      task: { acceptanceCriteria: ["a", "b", "c"] },
+    });
+    const updated = markAcceptanceCriterion(task, "AC-1", "met", clock);
+    expect(measuredAcceptanceCriteriaMet(updated)).toBe(1);
+  });
+
+  it("reports a truthful zero when a criterion was measured and did not pass", () => {
+    const { task, clock } = createHarness();
+    const updated = markAcceptanceCriterion(task, "AC-1", "not-met", clock);
+    // Zero here means "measured, none satisfied" — not "unmeasured".
+    expect(measuredAcceptanceCriteriaMet(updated)).toBe(0);
+  });
+
+  it("counts met and waived criteria together", () => {
+    const { task, clock } = createHarness({
+      task: { acceptanceCriteria: ["a", "b", "c"] },
+    });
+    let current = markAcceptanceCriterion(task, "AC-1", "met", clock);
+    current = markAcceptanceCriterion(current, "AC-2", "waived", clock);
+    expect(measuredAcceptanceCriteriaMet(current)).toBe(2);
+  });
+});
+
+describe("assessAcceptanceCriteria", () => {
+  const boundTask = () =>
+    createHarness({
+      task: {
+        acceptanceCriteria: [
+          {
+            statement: "src/core/text.ts exports normalizeText",
+            verifiedBy: { suite: "verification-command" },
+          },
+          { statement: "The API is easy to use" },
+        ],
+      },
+    });
+
+  it("leaves a bound criterion pending when its suite produced no evidence", () => {
+    const { task, clock } = boundTask();
+    const result = assessAcceptanceCriteria(task, [], clock);
+    expect(result.assessed).toEqual([]);
+    expect(result.task).toBe(task);
+    expect(result.task.acceptanceCriteria[0]?.status).toBe("pending");
+  });
+
+  it("leaves a bound criterion pending when only an unrelated suite ran", () => {
+    const { task, clock } = boundTask();
+    const result = assessAcceptanceCriteria(
+      task,
+      [{ suite: "task-contract", passed: 4, failed: 0 }],
+      clock,
+    );
+    expect(result.assessed).toEqual([]);
+    expect(result.task.acceptanceCriteria[0]?.status).toBe("pending");
+  });
+
+  it("marks a bound criterion met from a passing suite, with provenance", () => {
+    const { task, clock } = boundTask();
+    const result = assessAcceptanceCriteria(
+      task,
+      [{ suite: "verification-command", passed: 5, failed: 0 }],
+      clock,
+    );
+    expect(result.assessed).toEqual([
+      {
+        criterionId: "AC-1",
+        status: "met",
+        suite: "verification-command",
+        passed: 5,
+        failed: 0,
+      },
+    ]);
+    const criterion = result.task.acceptanceCriteria[0];
+    expect(criterion?.status).toBe("met");
+    expect(criterion?.evidence).toEqual([
+      "suite:verification-command",
+      "passed:5",
+      "failed:0",
+    ]);
+    // The unbound criterion is untouched: nothing inferred it from the pass.
+    expect(result.task.acceptanceCriteria[1]?.status).toBe("pending");
+  });
+
+  it("marks a bound criterion not-met from a failing suite, with provenance", () => {
+    const { task, clock } = boundTask();
+    const result = assessAcceptanceCriteria(
+      task,
+      [{ suite: "verification-command", passed: 3, failed: 2 }],
+      clock,
+    );
+    expect(result.assessed[0]).toMatchObject({
+      criterionId: "AC-1",
+      status: "not-met",
+      passed: 3,
+      failed: 2,
+    });
+    expect(result.task.acceptanceCriteria[0]?.evidence).toEqual([
+      "suite:verification-command",
+      "passed:3",
+      "failed:2",
+    ]);
+  });
+
+  it("treats a suite that reported no checks as no evidence", () => {
+    const { task, clock } = boundTask();
+    const result = assessAcceptanceCriteria(
+      task,
+      [{ suite: "verification-command", passed: 0, failed: 0 }],
+      clock,
+    );
+    expect(result.assessed).toEqual([]);
+    expect(result.task.acceptanceCriteria[0]?.status).toBe("pending");
+  });
+
+  it("merges repeated evidence for the same suite before judging it", () => {
+    const { task, clock } = boundTask();
+    const result = assessAcceptanceCriteria(
+      task,
+      [
+        { suite: "verification-command", passed: 3, failed: 0 },
+        { suite: "verification-command", passed: 0, failed: 1 },
+      ],
+      clock,
+    );
+    expect(result.assessed[0]).toMatchObject({ passed: 3, failed: 1 });
+    expect(result.task.acceptanceCriteria[0]?.status).toBe("not-met");
+  });
+
+  it("never overwrites an explicit waiver or a human assertion", () => {
+    const { task, clock } = createHarness({
+      task: {
+        acceptanceCriteria: [
+          {
+            statement: "Waived by the operator",
+            verifiedBy: { suite: "verification-command" },
+          },
+          {
+            statement: "Asserted met by a human",
+            verifiedBy: { suite: "verification-command" },
+          },
+        ],
+      },
+    });
+    const waived = markAcceptanceCriterion(task, "AC-1", "waived", clock);
+    const asserted = markAcceptanceCriterion(waived, "AC-2", "met", clock);
+    const result = assessAcceptanceCriteria(
+      asserted,
+      [{ suite: "verification-command", passed: 0, failed: 9 }],
+      clock,
+    );
+    // A failing suite does not overturn a deliberate acknowledgement or assertion.
+    expect(result.assessed).toEqual([]);
+    expect(result.task.acceptanceCriteria[0]?.status).toBe("waived");
+    expect(result.task.acceptanceCriteria[1]?.status).toBe("met");
+  });
+
+  it("reports one assessed criterion among pending ones without inventing the rest", () => {
+    const { task, clock } = createHarness({
+      task: {
+        acceptanceCriteria: [
+          {
+            statement: "bound",
+            verifiedBy: { suite: "verification-command" },
+          },
+          "unbound one",
+          "unbound two",
+        ],
+      },
+    });
+    const result = assessAcceptanceCriteria(
+      task,
+      [{ suite: "verification-command", passed: 1, failed: 0 }],
+      clock,
+    );
+    expect(acceptanceSummary(result.task)).toMatchObject({
+      total: 3,
+      met: 1,
+      pending: 2,
+    });
+    // 1 of 3 measured: the other two are not presented as failures.
+    expect(measuredAcceptanceCriteriaMet(result.task)).toBe(1);
+  });
+
+  it("carries an explicit binding from structured criteria input", () => {
+    const { task } = createHarness({
+      task: {
+        acceptanceCriteria: [
+          { statement: "a", verifiedBy: { suite: "verification-command" } },
+          "b",
+        ],
+      },
+    });
+    expect(task.acceptanceCriteria[0]).toEqual({
+      id: "AC-1",
+      statement: "a",
+      status: "pending",
+      verifiedBy: { suite: "verification-command" },
+    });
+    expect(task.acceptanceCriteria[1]).toEqual({
+      id: "AC-2",
+      statement: "b",
+      status: "pending",
+    });
+  });
+});
+
+describe("assessAcceptanceCriteria: criterion-specific evidence", () => {
+  const checkedTask = () =>
+    createHarness({
+      task: {
+        acceptanceCriteria: [
+          {
+            statement: "check A passes",
+            verifiedBy: { suite: "verification-command", check: "check-a" },
+          },
+          {
+            statement: "check B passes",
+            verifiedBy: { suite: "verification-command", check: "check-b" },
+          },
+          "human judgement",
+        ],
+      },
+    });
+
+  it("marks a criterion met from its own passing check, with stable provenance", () => {
+    const { task, clock } = checkedTask();
+    const result = assessAcceptanceCriteria(
+      task,
+      [
+        {
+          suite: "verification-command",
+          check: "check-a",
+          passed: 1,
+          failed: 0,
+        },
+      ],
+      clock,
+    );
+    expect(result.assessed).toEqual([
+      {
+        criterionId: "AC-1",
+        status: "met",
+        suite: "verification-command",
+        check: "check-a",
+        passed: 1,
+        failed: 0,
+      },
+    ]);
+    expect(result.task.acceptanceCriteria[0]?.evidence).toEqual([
+      "suite:verification-command",
+      "check:check-a",
+      "result:passed",
+      "passed:1",
+      "failed:0",
+    ]);
+  });
+
+  it("marks a criterion not-met from its own failing check", () => {
+    const { task, clock } = checkedTask();
+    const result = assessAcceptanceCriteria(
+      task,
+      [
+        {
+          suite: "verification-command",
+          check: "check-a",
+          passed: 0,
+          failed: 1,
+        },
+      ],
+      clock,
+    );
+    expect(result.assessed[0]).toMatchObject({
+      criterionId: "AC-1",
+      status: "not-met",
+      check: "check-a",
+    });
+    expect(result.task.acceptanceCriteria[0]?.evidence).toContain(
+      "result:failed",
+    );
+  });
+
+  it("does not let an unrelated failing check invalidate a passing one", () => {
+    const { task, clock } = checkedTask();
+    const result = assessAcceptanceCriteria(
+      task,
+      [
+        {
+          suite: "verification-command",
+          check: "check-a",
+          passed: 1,
+          failed: 0,
+        },
+        {
+          suite: "verification-command",
+          check: "check-b",
+          passed: 0,
+          failed: 1,
+        },
+      ],
+      clock,
+    );
+    // AC-1 is `met` on its own check even though a sibling check failed; AC-2 is
+    // `not-met` on its own. One check's outcome never leaks into the other.
+    expect(result.task.acceptanceCriteria[0]?.status).toBe("met");
+    expect(result.task.acceptanceCriteria[1]?.status).toBe("not-met");
+  });
+
+  it("leaves a criterion pending when its check never ran", () => {
+    const { task, clock } = checkedTask();
+    const result = assessAcceptanceCriteria(
+      task,
+      [
+        {
+          suite: "verification-command",
+          check: "check-b",
+          passed: 1,
+          failed: 0,
+        },
+      ],
+      clock,
+    );
+    // AC-1's check did not run: no guessing, and no borrowing the suite's verdict.
+    expect(result.task.acceptanceCriteria[0]?.status).toBe("pending");
+    expect(result.task.acceptanceCriteria[0]?.evidence).toBeUndefined();
+    expect(result.assessed.map((entry) => entry.criterionId)).toEqual(["AC-2"]);
+  });
+
+  it("does not fabricate a status from a whole-suite result when a check is bound", () => {
+    const { task, clock } = checkedTask();
+    const result = assessAcceptanceCriteria(
+      task,
+      [{ suite: "verification-command", passed: 9, failed: 0 }],
+      clock,
+    );
+    // A whole-suite pass is not evidence for a criterion that asked for one check.
+    expect(result.assessed).toEqual([]);
+    expect(result.task.acceptanceCriteria[0]?.status).toBe("pending");
+  });
+
+  it("keeps a suite-only binding on the whole-suite verdict (back-compat)", () => {
+    const { task, clock } = createHarness({
+      task: {
+        acceptanceCriteria: [
+          {
+            statement: "the whole suite passes",
+            verifiedBy: { suite: "verification-command" },
+          },
+        ],
+      },
+    });
+    const result = assessAcceptanceCriteria(
+      task,
+      [
+        { suite: "verification-command", passed: 2, failed: 0 },
+        {
+          suite: "verification-command",
+          check: "check-z",
+          passed: 0,
+          failed: 1,
+        },
+      ],
+      clock,
+    );
+    // Suite-only evidence is the aggregate of everything reported under the suite,
+    // exactly as before named checks existed; the provenance is unchanged.
+    expect(result.assessed[0]).toMatchObject({ passed: 2, failed: 1 });
+    expect(result.task.acceptanceCriteria[0]?.evidence).toEqual([
+      "suite:verification-command",
+      "passed:2",
+      "failed:1",
+    ]);
+  });
+
+  it("never overwrites a waiver when its bound check fails", () => {
+    const { task, clock } = createHarness({
+      task: {
+        acceptanceCriteria: [
+          {
+            statement: "waived by the operator",
+            verifiedBy: { suite: "verification-command", check: "check-a" },
+          },
+        ],
+      },
+    });
+    const waived = markAcceptanceCriterion(task, "AC-1", "waived", clock);
+    const result = assessAcceptanceCriteria(
+      waived,
+      [
+        {
+          suite: "verification-command",
+          check: "check-a",
+          passed: 0,
+          failed: 1,
+        },
+      ],
+      clock,
+    );
+    expect(result.assessed).toEqual([]);
+    expect(result.task.acceptanceCriteria[0]?.status).toBe("waived");
+  });
+
+  it("carries a check binding from structured criteria input", () => {
+    const { task } = createHarness({
+      task: {
+        acceptanceCriteria: [
+          {
+            statement: "a",
+            verifiedBy: { suite: "verification-command", check: "check-a" },
+          },
+        ],
+      },
+    });
+    expect(task.acceptanceCriteria[0]?.verifiedBy).toEqual({
+      suite: "verification-command",
+      check: "check-a",
+    });
+  });
+});
+
 describe("validateTask", () => {
   const { task } = createHarness();
 
@@ -349,6 +789,42 @@ describe("validateTask", () => {
           ],
         }),
       "INVARIANT",
+    );
+  });
+
+  it("rejects an acceptance criterion binding without a suite", () => {
+    expectDomainError(
+      () =>
+        validateTask({
+          ...task,
+          acceptanceCriteria: [
+            {
+              id: "AC-1",
+              statement: "x",
+              status: "pending",
+              verifiedBy: { suite: "" },
+            },
+          ],
+        }),
+      "VALIDATION",
+    );
+  });
+
+  it("rejects an acceptance criterion binding with an empty check id", () => {
+    expectDomainError(
+      () =>
+        validateTask({
+          ...task,
+          acceptanceCriteria: [
+            {
+              id: "AC-1",
+              statement: "x",
+              status: "pending",
+              verifiedBy: { suite: "verification-command", check: "" },
+            },
+          ],
+        }),
+      "VALIDATION",
     );
   });
 

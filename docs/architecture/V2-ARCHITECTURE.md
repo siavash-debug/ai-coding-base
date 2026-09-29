@@ -370,6 +370,9 @@ export interface TaskAcceptanceCriterion {
   readonly id: string; // stable within the task, e.g. "AC-1"
   readonly statement: string;
   readonly status: "pending" | "met" | "not-met" | "waived";
+  readonly verifiedBy?: { suite: string; check?: string }; // the author's declaration; §8.1
+  readonly evidence?: readonly string[]; // references that produced an automatic status; ADR-060
+  readonly verdictBy?: string; // the person who set the status; ADR-062
 }
 
 export interface VerificationStep {
@@ -385,6 +388,7 @@ export interface VerificationStep {
 - Because `{}` means unbounded, policy MAY require an explicit budget for `high`/`critical` risk tasks (ADR-009). An unbounded budget on a high-risk task is a policy finding, not a silent default.
 - `completedAt` is set if and only if `status` is `completed`.
 - Acceptance criteria are _observable_; a criterion with no verifiable statement is a defect in the task, not in the platform.
+- A non-`pending` criterion status has **exactly one source**: deterministic evidence the author bound it to (`verifiedBy` + `evidence`, ADR-060), or a named person (`verdictBy`, ADR-062). The two never coexist on one criterion, and a status a human set is never overwritten by a later run.
 - Task status only changes through the lifecycle transition function (§18).
 
 **SHOULD**
@@ -1556,9 +1560,29 @@ ai policy <show|explain <operation>>
 - The CLI is a **thin adapter**: parse/validate args → call an application use-case → format output. No business logic in command handlers.
 - **Zero mandatory runtime dependencies** for the core. A dependency-light arg parser (or Node's built-in `util.parseArgs`) SHOULD be used; no CLI framework unless it earns its place.
 - Every command supports `--json` for machine consumption; human output is for humans and is not a stable contract.
-- Every command that can mutate state supports `--dry-run`.
+- Every command that can mutate persistent or external state supports `--dry-run`. A dry run
+  validates, resolves scope and configuration, loads state, and reports what _would_ happen, but
+  performs no mutation: it writes no event, changes no task, records no selection or approval, and
+  makes no provider, decision-layer or agent call. It is never "execute, then discard the result".
+  Policy, risk, approval and deterministic budget checks still run, so a dry run refuses what a real
+  run would refuse; a repeated dry run is idempotent and leaves no hidden state.
+  - For `ai task run` the boundary is the task-risk decision the attempt would record: the dry run
+    resolves and validates the attempt and reports the deterministic risk gate, any approval already
+    on record and the capability envelope, then stops — no session, no decision provider, no runner.
+  - For `ai task orchestrate` the boundary is `TaskStarted`/session creation: the dry run builds the
+    deterministic plan (extracted requirements, registry eligibility, permitted plan variants) and
+    reports it without starting the task, opening a session or calling a frontier step.
 - `ai doctor` is the first-line diagnostic: it reports toolchain versions, resolved config, isolation enforcement level per dimension, and which optional adapters (JEV, LLM, sandbox, store) are active — including explicitly reporting "not configured".
-- Exit codes are stable and documented: `0` success, `1` general failure, `2` usage error, `3` policy denied, `4` budget exceeded, `5` approval required/denied.
+- Exit codes are stable and documented. They fall into two contracts, deliberately kept apart:
+  - **Task execution outcomes** — `ai task run`, and `ai task approve --resume` (which runs):
+    `0` reached review, `1` general failure (a provider or verification failure, or an unexpected
+    domain error), `2` usage error, `3` policy denied, `4` budget exceeded (including a context
+    selection that does not fit its budget), `5` approval required/denied. Each is read from the
+    structured run outcome, never inferred from rendered text.
+  - **`ai policy --check`** — a query that evaluates a hypothetical operation and performs nothing:
+    `0` allowed, `1` denied or approval-required, `2` uninterpretable target. It keeps this query
+    contract rather than the execution codes above, because a denied answer to "what would happen?"
+    is a completed evaluation, not a failed run (§37).
 
 `Deferred (Phase C)`: the entire CLI. §25.1 is a target surface, not an implementation claim.
 
@@ -1716,6 +1740,33 @@ graph LR
 
 `Deferred (Phase H)`: checkpoint store, rehydrator, replay CLI (`ai task replay --from <checkpoint>`), diff reporting.
 
+### 30.4 Acceptance replay: the record is checked against its log
+
+> **Added after Phase H** (2026-09-27, ADR-063). This is the one part of replay that is built: not a
+> re-run of the work, but a re-fold of the acceptance events, which is enough to prove the persisted
+> task record is the record its own history produced. Nothing here authorises the deferred items above.
+
+The two events that establish an acceptance criterion — `AcceptanceAssessed` from verification the task
+author bound the criterion to, and `AcceptanceVerdictRecorded` from a person (ADR-060, ADR-062) — are
+folded by `replayAcceptance` (`src/application/acceptance-replay.ts`), and `ai doctor` runs it over every
+task record in the workspace as the **`acceptance-replay`** probe.
+
+The fold is the domain's own rule rather than a second reading of it: an assessment establishes a
+`pending`, bound criterion as `met` or `not-met` and records the evidence identity it read; a verdict
+establishes `met`, `not-met` or `waived`, replaces the machine's evidence, and keeps the author's
+binding; a criterion a person established is never re-assessed. Comparison is per criterion — status,
+source, evidence identity, and the evidence's consistency with the status — and a disagreement is a
+failure naming the criterion and both values, never a repair. The check is read-only, and an execution
+event such as `TestCompleted` establishes nothing by itself: without the binding contract there is
+nothing for it to be evidence _of_.
+
+One limit is stated rather than glossed: the criteria themselves (id, statement, the author's binding)
+live in the task record, because `TaskCreated` does not carry them, so only a criterion's **state** is
+replayed; and an assessment records which evidence decided a criterion, not what that evidence measured,
+so the record's `passed`/`failed` counts are checked for shape and for consistency with the status
+rather than for value. ADR-063 records the additive payload field that would make the count values
+checkable, and why it is deliberately not part of this step.
+
 ---
 
 ## 31. Plugin architecture
@@ -1838,37 +1889,43 @@ graph LR
   B --> C["Phase C<br/>vertical slice: events + trace + CLI ✅"]
   C --> D["Phase D<br/>real provider + approval resume + locking ✅"]
   D --> E["Phase E<br/>deterministic context engine ✅"]
-  E --> F["Phase F<br/>policy enforcement + isolation adapters"]
+  E --> F["Phase F<br/>policy enforcement + isolation adapters ✅"]
   F --> G["Phase G<br/>decision layer (JEV) ✅"]
-  G --> H["Phase H<br/>semantic retrieval + MongoDB vector search"]
-  H --> I["Phase I<br/>dashboard (optional)"]
+  G --> H["Phase H<br/>multi-model frontier ✅"]
+  H --> I["Phase I<br/>semantic retrieval + MongoDB vector search"]
+  I --> J["Phase J<br/>dashboard (optional)"]
 ```
 
-| Phase    | Deliverable                                                                                                                                                                                         | Exit criteria                                                                                                                                                                                                                                       |
-| -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **A** ✅ | Baseline workspace, agent/task contracts, verification pipeline                                                                                                                                     | `verify.sh` green on Linux CI                                                                                                                                                                                                                       |
-| **B** ✅ | `V2-ARCHITECTURE.md`, `DECISIONS.md`, pure domain skeleton, unit tests                                                                                                                              | RFC internally consistent; domain typechecks, tests pass, no vendor coupling                                                                                                                                                                        |
-| **C** ✅ | JSONL event store, file task repository, application services, trace read model, gates, CLI                                                                                                         | A real task can be created, run, traced and reported from its own events                                                                                                                                                                            |
-| **D** ✅ | One real provider adapter (behind a bounded retry decorator), approval grant consumption and resume, append coordination for the JSONL log                                                          | Real token/cost/failure metrics from a real call; an approved run resumes and the grant is recorded as consumed; two writers cannot append one sequence                                                                                             |
-| **E** ✅ | Deterministic context engine: bounded discovery, exclusion policy, explainable scoring, hard token budget, `ContextSelectionStarted`/`ContextSelected`, `ai task context`                           | Same state ⇒ same selection; the budget is never exceeded; every selected file can answer "why was I included?" from its events. A _comparative_ token-reduction experiment is not claimed — §36.9 records the baseline it will be measured against |
-| **F** ✅ | Policy, capability and sandbox enforcement: deny-by-default access policy, typed capabilities, `OperationGateway`, local filesystem/process/environment/network boundaries, approval integration    | No operation executes without passing capability → envelope → policy → boundary admission → approval; direct adapter access fails closed (ADR-048, ADR-050)                                                                                         |
-| **G** ✅ | The decision layer: a closed vocabulary of bounded decision kinds, `DecisionProvider` port, deterministic gates, validation, fallbacks, a real JEV HTTP adapter, decision budgets and `ai decision` | Every bounded question is recorded with provider, outcome, reason and cost; JEV cannot authorise, widen scope or bypass any Phase F check (ADR-052)                                                                                                 |
-| **H**    | Semantic retrieval / MongoDB vector search                                                                                                                                                          | Retrieval is project-scoped, explicitly opted into, and never a precondition for Phase E selection                                                                                                                                                  |
-| **I**    | Optional dashboard over the JSON projection                                                                                                                                                         | Dashboard removable without touching core                                                                                                                                                                                                           |
+| Phase    | Deliverable                                                                                                                                                                                                                                                                                                                                                                                                                     | Exit criteria                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **A** ✅ | Baseline workspace, agent/task contracts, verification pipeline                                                                                                                                                                                                                                                                                                                                                                 | `verify.sh` green on Linux CI                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| **B** ✅ | `V2-ARCHITECTURE.md`, `DECISIONS.md`, pure domain skeleton, unit tests                                                                                                                                                                                                                                                                                                                                                          | RFC internally consistent; domain typechecks, tests pass, no vendor coupling                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| **C** ✅ | JSONL event store, file task repository, application services, trace read model, gates, CLI                                                                                                                                                                                                                                                                                                                                     | A real task can be created, run, traced and reported from its own events                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| **D** ✅ | One real provider adapter (behind a bounded retry decorator), approval grant consumption and resume, append coordination for the JSONL log                                                                                                                                                                                                                                                                                      | Real token/cost/failure metrics from a real call; an approved run resumes and the grant is recorded as consumed; two writers cannot append one sequence                                                                                                                                                                                                                                                                                                                                                           |
+| **E** ✅ | Deterministic context engine: bounded discovery, exclusion policy, explainable scoring, hard token budget, `ContextSelectionStarted`/`ContextSelected`, `ai task context`                                                                                                                                                                                                                                                       | Same state ⇒ same selection; the budget is never exceeded; every selected file can answer "why was I included?" from its events. A _comparative_ token-reduction experiment is not claimed — §36.9 records the baseline it will be measured against                                                                                                                                                                                                                                                               |
+| **F** ✅ | Policy, capability and sandbox enforcement: deny-by-default access policy, typed capabilities, `OperationGateway`, local filesystem/process/environment/network boundaries, approval integration                                                                                                                                                                                                                                | No operation executes without passing capability → envelope → policy → boundary admission → approval; direct adapter access fails closed (ADR-048, ADR-050)                                                                                                                                                                                                                                                                                                                                                       |
+| **G** ✅ | The decision layer: a closed vocabulary of bounded decision kinds, `DecisionProvider` port, deterministic gates, validation, fallbacks, a real JEV HTTP adapter, decision budgets and `ai decision`                                                                                                                                                                                                                             | Every bounded question is recorded with provider, outcome, reason and cost; JEV cannot authorise, widen scope or bypass any Phase F check (ADR-052)                                                                                                                                                                                                                                                                                                                                                               |
+| **H** ✅ | Multi-model frontier: a declared model registry (capabilities, modalities, latency class, lifecycle, availability windows), capability filtering before selection, four routing modes, bounded plan variants (deterministic / single / decomposed / parallel), a `FrontierExecutor` port with an OpenAI-compatible adapter that can stream, per-step retries owned by the decision layer, `ai task orchestrate` and `ai models` | Every model call resolves through the registry to a configured provider that declares it; an unregistered, misattributed or unsupported request fails explicitly rather than being substituted; a permitted reorder is a permutation of the offered candidates; usage, cost and failure stay attributable to one model. Met locally — `pnpm verify` green, the pipeline exercised end to end by tests and one live run. Not validated by CI (which runs on `main`) and **not declared frozen** (ADR-056, ADR-058) |
+| **I**    | Semantic retrieval / MongoDB vector search                                                                                                                                                                                                                                                                                                                                                                                      | Retrieval is project-scoped, explicitly opted into, and never a precondition for Phase E selection                                                                                                                                                                                                                                                                                                                                                                                                                |
+| **J**    | Optional dashboard over the JSON projection                                                                                                                                                                                                                                                                                                                                                                                     | Dashboard removable without touching core                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 
-### 33.1 Queued, not started
+### 33.1 Queued and recorded proposals
 
-Two proposals are recorded here so the roadmap cannot be read as silently redefined. Neither is
-implemented, neither is begun, and neither is a precondition for anything above.
+Proposals are recorded here so the roadmap cannot be read as silently redefined.
 
-- **Multi-model orchestration (queued).** A model registry with explicit capability and cost/latency
-  profiles, per-user model sets, and a second provider adapter (OpenRouter or any other) so the
-  decision layer can choose among _models_ rather than only among _paths_. §38.8 is explicit that
-  nothing in Phase G selects a model; this proposal is what would change that, and it must arrive as
-  its own phase with its own ADRs. It is executable only after Phase G is frozen and verified.
+- **Multi-model orchestration — since delivered as Phase H.** A model registry with explicit
+  capability and cost/latency profiles, per-user model sets, and a second provider adapter so the
+  decision layer can choose among _models_ rather than only among _paths_. §38.8 was explicit that
+  nothing in Phase G selects a model, and this was the proposal that changed it; it arrived as its
+  own phase with its own ADR (**ADR-058**, §39).
+- **Roadmap letters were reassigned when that happened.** Phase H was reserved here for semantic
+  retrieval; it now names the frontier layer, semantic retrieval moved to Phase I, and the dashboard
+  to Phase J. The letters remain chronological — they name the order work happened in — and they are
+  restated here rather than quietly edited, because a roadmap whose reserved letters can shift
+  without a note is exactly the silent redefinition this section exists to prevent.
 - **A real OS/container/namespace execution boundary (queued).** Phase F's boundaries are in-process
-  and labelled as such (§37.6). Kernel-level isolation is a later architectural phase, not Phase G and
-  not Phase H.
+  and labelled as such (§37.6). Kernel-level isolation is a later architectural phase, not Phase H and
+  not Phase I.
 
 ---
 
@@ -1932,6 +1989,9 @@ elsewhere — a task id is not an authorisation and must not become an oracle.
 
 - **The agent runtime is simulated.** It reports real provider usage and real workspace reads,
   but it performs no engineering work. `ai doctor` prints this as a warning (ADR-030).
+  _Reconciled 2026-09-27: this described the default runner; a project can now select a bounded real
+  coding path (ADR-059) and, with named checks, criterion-bound acceptance evidence (ADR-060). The
+  default runner is still simulated._
 - **The only LLM provider is deterministic and offline**, with illustrative rates (ADR-031).
   _Phase D changed this: see §35.2._
 - **JEV is absent, and its absence changes nothing** — the platform runs on code + policy
@@ -2077,6 +2137,9 @@ Honest limits, stated because they matter:
   call with real usage and real latency, and it performs a real read-only workspace listing and real
   task-contract verification — but it performs no engineering work. There is no agent framework and
   no autonomous loop (ADR-030 reports this as a warning).
+  _Reconciled 2026-09-27: still true of the default runner; a project can now select a bounded real
+  coding path through the enforcement boundary (ADR-059) and bind a criterion to a named check
+  (ADR-060). The default runner remains simulated._
 - **No sandbox.** The only tool the runner uses is a workspace listing through the filesystem
   directly. Command execution, containment and capability enforcement remain Phase F.
 - **No live end-to-end vendor verification** is part of the automated suite: that needs a key and
@@ -2243,6 +2306,14 @@ selection latency and budget overflows — joined to task outcome, cost and dura
 itself. This is a **baseline**, not a framework: no scoring of "usefulness" is claimed, and the metric
 is named `contextSelectionRatio` (`selectedTokens / candidateTokens`) for exactly what it measures.
 
+A **comparative** benchmark now exists and has been run: `src/evaluation/context-selection-benchmark.ts`
+feeds the same candidate set and budget to the real deterministic engine and to a naive baseline that
+packs candidates in declared order and stops at the first that does not fit, then reports both
+`contextSelectionRatio` values over the shared pool. It is offline, deterministic and pure — the engine
+is injected, so there is no second selector to drift — and it measures packing only: it makes no claim
+about relevance or usefulness. The fixtures (`CONTEXT_SELECTION_BENCHMARK_SCENARIOS`) are small,
+transparent and hand-checkable, and the run is exercised by `tests/unit/context-selection-benchmark.test.ts`.
+
 ### 36.10 Still absent after Phase E
 
 - **No embeddings, no semantic search, no repository index.** Selection is path- and text-token
@@ -2258,6 +2329,10 @@ is named `contextSelectionRatio` (`selectedTokens / candidateTokens`) for exactl
   "deterministic candidate generation → JEV chooses among bounded strategies → deterministic selector
   executes".
 - **No sandbox, no command execution, no autonomous agent**. The agent runtime is still simulated.
+  _Reconciled 2026-09-27: the runtime can now be a bounded real coding path that executes a configured
+  verification command through the operation gateway (ADR-059), with criterion-bound acceptance
+  evidence from named checks (ADR-060). The default runner is still simulated, and there is still no
+  autonomous loop._
 - **Not distributed.** Append coordination remains single-machine (§35.5).
 
 ### 36.11 Layout added in Phase E
@@ -2324,7 +2399,8 @@ and may expire. An authority established within one attempt covers later gates i
 boundaries and nothing beyond them (ADR-037). `ai policy` shows the effect table and the envelope;
 `ai policy --check` performs the identical evaluation without performing, recording or consuming
 anything, and answers `allowed` (exit 0), `denied` (1) or `approval-required` (1, distinct by status)
-— an uninterpretable target exits 2 and evaluates nothing.
+— an uninterpretable target exits 2 and evaluates nothing. This is the policy-_query_ contract (§25.2);
+the task-execution outcomes `3`/`4`/`5` apply to a run, not to a hypothetical evaluation.
 
 ### 37.3 The sandbox
 
@@ -2460,20 +2536,27 @@ bounded question (candidates, reason codes, bounds — all built by deterministi
     ↓  deterministic fallback              (per domain, recorded with its reason)
     ↓  record                              (`DecisionRequested` / `DecisionCompleted` / `DecisionFailed`
                                             / `DecisionFallbackUsed`, scope-bound)
+    ↓  interpretation                      (deterministic, above the record: the answer that may be
+                                            acted on is derived from the answer that was given)
 ```
+
+The pipeline ends with a recorded answer, not an applied one. Interpretation is a separate,
+deterministic step — the same discipline that keeps a risk assessment unable to _lower_ a baseline —
+and it is where the platform applies its own policy to the layer's answer, including the completion
+confidence gate below (§38.3).
 
 ### 38.3 The eight decision domains
 
-| Domain             | What may change                                        | Deterministic gate when…                        |
-| ------------------ | ------------------------------------------------------ | ----------------------------------------------- |
-| `routing`          | which of the registered routes the attempt takes       | only one route is registered                    |
-| `tool-selection`   | which permitted tool the runtime uses                  | only one tool is permitted                      |
-| `risk-assessment`  | the risk the policy gate sees — it may only _raise_ it | the baseline is already `critical`              |
-| `retry`            | whether to re-run the attempt, within the hard cap     | the failure is not retryable, or the cap is met |
-| `completion`       | nothing: an assessment for a human and for the record  | verification failed, or no evidence exists      |
-| `ranking`          | the order of supplied candidates                       | one candidate                                   |
-| `relevance`        | whether bounded candidates are relevant                | — (conservative default: not established)       |
-| `human-escalation` | a recommendation to a human — never a request or grant | a security or policy refusal                    |
+| Domain             | What may change                                                                                                 | Deterministic gate when…                        |
+| ------------------ | --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| `routing`          | which of the registered routes the attempt takes                                                                | only one route is registered                    |
+| `tool-selection`   | which permitted tool the runtime uses                                                                           | only one tool is permitted                      |
+| `risk-assessment`  | the risk the policy gate sees — it may only _raise_ it                                                          | the baseline is already `critical`              |
+| `retry`            | whether to re-run the attempt, within the hard cap                                                              | the failure is not retryable, or the cap is met |
+| `completion`       | nothing: an assessment for a human and for the record; a `complete` below the configured confidence is withheld | verification failed, or no evidence exists      |
+| `ranking`          | the order of supplied candidates                                                                                | one candidate                                   |
+| `relevance`        | whether bounded candidates are relevant                                                                         | — (conservative default: not established)       |
+| `human-escalation` | a recommendation to a human — never a request or grant                                                          | a security or policy refusal                    |
 
 ### 38.4 Security: why a decision layer cannot gain authority
 
@@ -2526,6 +2609,11 @@ usage)` rather than printing an incomplete total as if it were the whole story.
 
 ### 38.8 Deliberately not implemented in Phase G
 
+> **Superseded in part by §39.** Two bullets below describe Phase G's own scope rather than the
+> platform's current state: multi-model routing arrived as Phase H (ADR-058), and streaming plus
+> additional LLM vendors arrived with it. What Phase G declined to do is still what Phase G did;
+> what it did not do is no longer a statement about the platform.
+
 - **No multi-model routing.** One LLM provider and one model id per project. The domains exist for
   model-level decisions; nothing selects a model yet.
 - **No JEV-specific types in the domain**, no JEV SDK, and no mandatory JEV: with
@@ -2555,6 +2643,246 @@ src/
 │   └── decision-coordinator.ts # scope-bound: budget, recording, ask/validate/fallback
 └── cli/commands/decision.ts    # `ai decision`
 ```
+
+### 38.10 Completion semantics: what the evidence question carries
+
+> **Added after Phase G** (2026-09-27, ADR-061). §38.3 described the `completion` domain before the
+> question it asks was made precise. Nothing in §38.3 changed; this section states what the question now
+> carries and what a layer's answer is allowed to claim.
+
+Completion is the one assessment whose answer _withholds_ a human, so the question is asked about a
+**classified evidence shape** rather than about counts a reader has to interpret. The classification is
+one closed vocabulary of facts about what was _measured_ — never a verdict about the work:
+
+| Shape             | What was measured                                                       |
+| ----------------- | ----------------------------------------------------------------------- |
+| `failed`          | verification ran and something failed                                   |
+| `none`            | no verification result exists at all                                    |
+| `no-criteria`     | the task declares no acceptance criteria, so none can be established    |
+| `unmeasured`      | criteria are declared and none has been assessed                        |
+| `partial`         | some criteria are established as satisfied and some are not             |
+| `fully-satisfied` | every declared criterion is established as satisfied and nothing failed |
+
+Each question carries the shape plus the counts it came from, so `0` is never inferred from an absent
+fact: `criteria:<met|unmeasured>/<total>` (unchanged, including its sentinel), `criteria-pending:<n>`,
+`verification-checks:<n>`, `verification-failures:<n>` and `evidence:<shape>`. `verification-failures`
+is new: it was previously unstated, which left "nothing failed" to be inferred from the gate that
+skipped the question.
+
+The reason codes offered for the question are bounded by the shape, and that bound is the enforcement
+rather than a comment on it: `criteria-met` is offered only for `fully-satisfied`, `criteria-unclear`
+only where something is not established, `verification-passed` wherever verification ran and nothing
+failed, and `evidence-insufficient` always. A layer that names a code the question did not offer has its
+answer rejected by the validator and answered by the deterministic fallback instead (ADR-053), so a claim
+the platform never measured cannot reach the record. The answer's _option_ is not constrained in the same
+way: `complete` / `incomplete` / `uncertain` remain available on every shape the layer is asked about,
+because that choice **is** the judgement being requested.
+
+Precedence is unchanged and stays in code, ahead of any provider: a verification failure outranks the
+absence of verification, and both are answered before the layer is consulted — so no answer can
+transform a failed verification into a completion. Partially measured evidence is deliberately _not_ a
+failure and deliberately _not_ answered by code: unmeasured stays unmeasured, the count of established
+criteria stays absent when nothing was assessed, and the human decides (ADR-028, ADR-054, ADR-060). The
+confidence gate is unchanged and still applies to the one answer that would withhold review.
+
+---
+
+## 39. Phase H status — the multi-model frontier
+
+> **Recorded after the fact.** This layer was built before it was documented. §33.1 listed
+> multi-model orchestration as queued and not begun, §38.8 stated there was no multi-model routing,
+> and no ADR covered it. This section is the record of what exists, not the plan for it: **ADR-058**
+> is the decision behind it, and nothing here authorises new work.
+
+§34–§38 exist so the document cannot be read as describing _more_ than exists. This section exists for
+the same reason in the other direction: for one phase the code moved ahead of the document, and a
+normative document that understates the implementation is as unusable as one that overstates it.
+
+### 39.1 What the phase is
+
+One configured provider and one model id became a **registry** of registered models — each with
+declared capability, modality, latency class, lifecycle and availability metadata — reachable through
+one or more configured providers, with an executor that runs exactly one step of the chosen plan.
+
+Routing is still not a model's job, and this is the whole design: **code filters and orders, the
+decision layer may reorder, and the frontier executes.** Adding a vendor is configuration plus an egress
+allowlist entry plus a model profile; no domain type names a vendor, and the executor has no way to
+request a different model, because a different model is a different request.
+
+### 39.2 The pipeline
+
+1. **Requirements.** `extractRequirements` reads the task's own words against closed vocabularies and
+   produces required capabilities, modalities and a complexity/risk classification, with stable reason
+   codes (`matched:coding`, `classified-analysis`) and never task text. Operator-supplied requirements
+   are merged and re-validated, so configuration cannot invent a capability no profile could declare.
+   Task text never changes a declared risk.
+2. **Eligibility.** `registry.eligible(requirements)` rejects in a fixed order — `disabled`, a declared
+   availability window not yet open, observed `health:<state>`, then role or capability mismatch — and
+   returns the surviving profiles in a deterministic order (priority descending, then model id).
+   Whether a model is _required_ at all is settled here too: a task requiring no model-only capability
+   plans zero calls.
+3. **Candidates.** `scoreCandidates` orders the eligible set by the configured routing mode. All four
+   (`cost`, `latency`, `quality`, `balanced`) compose an explicit key list; announced lifecycle decline
+   outranks every preference; every tie is broken by model id; an unpriced model is ordered as
+   _unknown_, never as free; and cost ordering uses a fixed reference usage so comparability never
+   depends on a live call.
+4. **Plan variants.** `buildPlanVariants` builds a bounded set: `plan:deterministic` (nothing needs a
+   model), `plan:single`, `plan:decomposed` (split along the modality seam) and `plan:parallel` (only
+   for declared independent sub-tasks). A decomposition is offered only when no single model covers the
+   requirements, only when each half has candidates, and only when it still covers everything the task
+   needs. If no variant is viable the run refuses before spending anything.
+5. **Strategy.** The decision layer's first question is `deterministic` / `model` / `human`, asked after
+   the (free) variants are built. A `human` answer attempts nothing at all: no step, no call, no
+   consumption, and the task lands in the existing human gate carrying the reason.
+6. **Variant choice.** When more than one variant survives it is a bounded judgement, so the decision
+   layer may choose; its answer is re-checked against the offered ids regardless.
+7. **Per-step ranking.** Each step's candidates are ordered deterministically, then offered to the
+   decision layer, which may reorder them. Validation guarantees the answer is a _permutation_ of what
+   was offered — a decision can express preference but cannot add, drop or resurrect a candidate.
+8. **Execution.** `FrontierExecutor.executeStep` resolves the model in the registry, checks the
+   provider is configured for this project, checks the adapter declares that model, and makes one call.
+   Resolution failure is a deterministic refusal, never a substitution.
+9. **Retry, completion, escalation.** A failure produces a _retry question_ bounded twice over (the
+   frontier's per-step cap and the per-task decision cap); a permitted retry rotates the fixed candidate
+   set rather than widening the search; completion is answered by code whenever verification evidence
+   settles it and otherwise by the decision layer, with an unsure verdict gated to `uncertain`; and
+   escalation is asked last.
+
+### 39.3 Invariants the phase is built on
+
+Each of these is enforced in code and asserted by tests rather than documented as intent.
+
+- **The registry is knowledge, not authority.** Its surface is `id`, `list`, `get`, `eligible`,
+  `noteHealth`, `snapshot` — deliberately no `select`, `best` or `rank`. It answers "who could do
+  this?", never "who may?" (policy) or "who should?" (the decision layer).
+- **A model is reached only through the `FrontierExecutor` port**, and the executor cannot be
+  constructed with a raw transport: provider adapters arrive already bound to the egress guard, so
+  provider host policy cannot be skipped by routing to a new vendor.
+- **Filtering precedes selection**, and no stage invents a capability: configuration, plan steps and
+  sub-tasks are each re-validated against the closed vocabularies.
+- **Identity is what was requested.** The executor returns the requested `modelId` as the identity and
+  keeps the provider's own name beside it as `reportedModelId` only when they differ, so a gateway's
+  normalised echo cannot repoint cost rates, events or traces.
+- **Unsupported work fails explicitly.** An unregistered model, a model attributed to the wrong
+  provider, a provider that does not serve it, and a requirement nothing satisfies are all refusals
+  with stable error codes. The one thing that never happens is a silent substitution, because the trace
+  would then lie about which model ran.
+- **Deterministic platform policy stays outside the model.** Every step carries a fixed system
+  instruction stating that supplied context is untrusted material and that the model cannot grant
+  permissions, change budgets, alter scope or approve operations.
+- **Unpriced is never free and absent usage is never zero** (ADR-035), and an empty or whitespace-only
+  completion is a failure on the shared failure path, so it reaches the retry and completion questions
+  as evidence that nothing was produced rather than as a quietly passing step.
+
+### 39.4 Failure semantics
+
+| What happens                                                          | Category                                                       | Retryable | Where it lands                                     |
+| --------------------------------------------------------------------- | -------------------------------------------------------------- | --------- | -------------------------------------------------- |
+| Model not in the registry; wrong provider; provider does not serve it | deterministic refusal (`NOT_FOUND`, `INVARIANT`, `VALIDATION`) | no        | the plan fails before any call                     |
+| Host not allowed by policy                                            | `refused`                                                      | no        | a refusal, never retried as a connection error     |
+| Credential missing or rejected                                        | `auth`                                                         | no        | the model is marked unavailable                    |
+| Rate limit, timeout, connection failure, 5xx                          | `rate-limit`, `timeout`, `network`, `server`                   | yes       | the retry question, then the next ranked candidate |
+| Empty or whitespace-only completion                                   | `malformed-response`                                           | no        | evidence of nothing produced, not a success        |
+| Budget would be exceeded                                              | `budget-exceeded`                                              | n/a       | the step is skipped and a checkpoint is recorded   |
+
+### 39.5 Observability
+
+The plan is recorded _before_ any call, so a run that dies mid-step still explains what it intended:
+`OrchestrationPlanned` carries the plan id, strategy, reason code, step count, the models deterministic
+ranking _would_ use, the provider set, the call cap, and the candidate and rejected model lists. Each
+call emits `LLMRequestStarted` / `Completed` / `Failed` with provider, model, usage, latency, retries
+and the provider's request id, and each step report carries status, attempts, latency, usage, cost,
+finish reason, selection reason and the ranked candidates it chose between. Prompts, completions and
+context content are never event payloads. `ai doctor` audits recorded plans for internal consistency
+(step counts, call caps, candidate lists).
+
+### 39.6 CLI and doctor
+
+- `ai task orchestrate <task-id> [--require <capability>] [--specialize <domain>] [--subtask <instruction>] [--context]`
+- `ai models [--json]` — the catalog, declared capabilities, reachability and current availability.
+- `ai task trace` / `ai task decisions` / `ai task cost` / `ai task usage` report the run from its own
+  events. `ai doctor` reports the frontier, the orchestration audit, and each provider's credential
+  presence and egress reachability — offline, without calling anyone.
+
+### 39.7 Verification status
+
+**Met locally, and not more than that.** `pnpm verify` runs green (7/7 steps) with 54 test files and 1093
+tests passing, the frontier and orchestration checks in `ai doctor` pass, and the pipeline has been
+exercised against a real vendor end to end. The phase is **not declared frozen**: the work lives on a
+branch that CI has never seen, because the CI gate is configured for `main`, and §33's freeze-then-advance
+rule was in this one case applied after the fact instead of before. The comparative benchmark against a
+single-model baseline that this section previously listed as unrun now exists and has been run (§39.10);
+it is a measurement, not a verdict, and running it does not by itself declare the phase frozen.
+
+### 39.8 Deliberately not implemented after Phase H
+
+- **No semantic retrieval, embeddings or vector search.** `relevance` works only over supplied
+  candidates, and a model whose declared role is `retrieval` is registered knowledge that Frontier
+  cannot name or execute.
+- **No measured quality or latency feedback into routing.** `quality` mode orders by _declared_
+  priority, not by an observed benchmark, and cost ordering is a fixed reference usage rather than a
+  prediction.
+- **No replay or checkpoint execution.** `CheckpointCreated` records position and reason; nothing
+  resumes from it.
+- **No global or cross-workspace registry**, and observed health is process-local rather than persisted,
+  so a degraded model recovers by being tried again rather than by being remembered as recovered.
+- **No container, VM or remote execution boundary**, no autonomous loop beyond the declared plan, no
+  per-token streaming to callers (a streamed answer is assembled before it is returned), no decision
+  cache, and no real agent runtime — the bundled runner is still simulated, so the frontier decides
+  which model runs and records what it said, and performs no engineering work.
+  _Reconciled 2026-09-27: the bundled default runner is still simulated, but a project can select a
+  bounded real coding path (ADR-059) that performs engineering work only through the enforcement
+  boundary and can evidence criteria through named checks (ADR-060)._
+
+### 39.9 Layout added in Phase H
+
+```text
+src/
+├── models/
+│   ├── model.ts          # the vocabulary: capabilities, modalities, roles, lifecycle, availability
+│   └── registry.ts       # eligibility, deterministic order, process-local health
+├── orchestration/
+│   ├── requirements.ts   # task text → required capabilities (deterministic, closed vocabularies)
+│   ├── plan.ts           # candidate scoring, four routing modes, bounded plan variants
+│   └── orchestrator.ts   # the use case: plan → decide → execute → account
+├── ports/
+│   └── frontier.ts       # the execution port: one step, one model, no choice
+├── adapters/frontier/
+│   └── llm-frontier.ts   # registry → LlmProvider → adapter; normalises, never substitutes
+└── cli/commands/models.ts    # `ai models`
+```
+
+### 39.10 Comparative benchmark — frontier versus a single-model baseline
+
+The comparison §39.7 requires now exists and has been run: `src/evaluation/frontier-benchmark.ts`,
+exercised by `tests/unit/frontier-benchmark.test.ts`. It is a **measurement, not a ranking** — it reports
+the §29.1 dimensions for two paths, computes no overall score, and must not be read as showing one
+architecture to be better.
+
+- **Both paths are the real orchestrator.** The multi-model path runs `runtime.orchestrator.run` with the
+  project's routing configuration as given; the single-model baseline runs the _same_ orchestrator,
+  registry and routing mode with decomposition and parallelism disabled, so exactly one model must cover
+  the whole task. Nothing bypasses the real registry, eligibility filter, plan builder, decision
+  coordinator or `FrontierExecutor`.
+- **Offline and deterministic.** The frontier is a scripted `FrontierExecutor`, the decision layer is a
+  deterministic responder and time is the injected clock: no network, no credential, no spend, and
+  repeated runs are identical.
+- **Acceptance is explicit.** The orchestration path does not verify a task's acceptance criteria itself,
+  so a run is accepted only when models that produced _completed_ steps collectively cover the
+  scenario's declared capabilities — never merely because it returned without throwing. The check is
+  identical for both paths.
+- **Dimensions (§29.1).** Task success (capability-coverage acceptance); `tokensPerAcceptedTask`;
+  `costMicrosPerAcceptedTask` from the existing rate table (absent when an accepted run is unpriced);
+  speed as the sum of executed step latencies, with the clock-derived `durationMs` also recorded; and
+  reliability as `acceptedTasks / attemptedTasks` with the denominator stated.
+- **Scenarios.** Four deterministic fixtures: a task one model satisfies; a vision-plus-coding task no
+  single model covers; declared independent sub-tasks; and a rate-limited first candidate with a second
+  eligible candidate.
+- **Measured, for these fixtures only.** Multi-model versus single-model: 4/4 versus 3/4 accepted (the
+  baseline refuses the vision-plus-coding task, which no single model can serve), 2,250 versus 1,500
+  tokens per accepted task, 3µ$ versus 2µ$ per accepted task, and 37.5ms versus 25ms of step latency per
+  accepted task. These are reported as measurements over these fixtures, without verdict: they are not a
+  claim of general superiority and do not replace the CI and freeze-process steps above.
 
 ---
 
@@ -2587,7 +2915,7 @@ src/
 │   ├── llm/              # deterministic offline provider + openai-compatible adapter + retry
 │   ├── http/             # fetch transport (the only socket)
 │   ├── time/             # timer sleep
-│   └── agent/            # simulated agent runner (NOT an agent framework)
+│   └── agent/            # simulated + change-set agent runners (NOT an agent framework)
 ├── application/          # runtime (composition root), services, ledger, trace, run, doctor
 └── cli/                  # args, io, render, help, commands/, main, run (process shim)
 ```

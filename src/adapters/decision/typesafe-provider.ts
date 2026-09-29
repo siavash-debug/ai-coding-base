@@ -46,7 +46,7 @@ import {
  * This adapter is the *only* module in the repository that imports the TypeSafe SDK,
  * and it imports the vendored shape of it exactly once. Everything above sees
  * `DecisionRequest` and `DecisionResponse`; nothing JEV-specific escapes this file
- * (ADR-022, ADR-051, ADR-057).
+ * (ADR-022, ADR-051).
  *
  * Four rules are enforced here rather than documented as intentions:
  *

@@ -486,7 +486,8 @@ describe("cli task", () => {
     const id = await createTask(env, ["--max-tokens", "1000"]);
 
     const run = await cli(["task", "run", id], env);
-    expect(run.code).toBe(1);
+    // Budget exceeded is the dedicated lifecycle code 4, not the generic failure 1.
+    expect(run.code).toBe(4);
     expect(run.cap.outText()).toContain("Outcome  budget-exceeded");
 
     const status = await cli(["task", "status", id], env);
@@ -498,7 +499,8 @@ describe("cli task", () => {
     const id = await createTask(env, ["--risk", "high"]);
 
     const run = await cli(["task", "run", id], env);
-    expect(run.code).toBe(1);
+    // A suspension waiting on a human is the dedicated lifecycle code 5.
+    expect(run.code).toBe(5);
     expect(run.cap.outText()).toContain("Outcome  awaiting-approval");
 
     const trace = await cli(["task", "trace", id], env);

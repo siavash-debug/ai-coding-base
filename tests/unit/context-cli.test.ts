@@ -234,7 +234,8 @@ describe("ai task context --select: a fresh selection, recorded and declared", (
     ]);
 
     const { code, cap } = await cli(["task", "context", id, "--select"], env);
-    expect(code).toBe(1);
+    // A budget the selection cannot fit is the dedicated lifecycle code 4.
+    expect(code).toBe(4);
     expect(cap.outText()).toContain("OVER BUDGET");
     expect(cap.outText()).toContain("refuses to proceed");
   });

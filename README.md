@@ -28,6 +28,30 @@ pnpm verify
 | `pnpm build`        | TypeScript emit to `dist/`        |
 | `pnpm verify`       | `scripts/verify.sh` full pipeline |
 
+### Exit codes
+
+Universal codes: `0` success, `1` general failure, `2` usage error.
+
+A `task run` (and `task approve --resume`, which runs) reports a task-execution outcome with its own
+code: `3` policy denied, `4` budget exceeded, `5` approval required/denied. `ai policy --check` is a
+_query_ that evaluates a hypothetical operation and performs nothing, so it keeps its own contract —
+`0` allowed, `1` denied or approval-required, `2` uninterpretable — rather than the execution codes.
+
+### Dry runs
+
+Every command that can mutate state supports `--dry-run` (`init`, `task create`, `task run`,
+`task orchestrate`, `task verdict`, `task complete`, `task approve`, `task context --select`). A dry run
+validates, resolves scope, and reports what would happen, but writes no event, changes no task, records
+no selection or approval, and makes no provider, decision-layer or agent call. Policy, risk, approval
+and deterministic budget checks still run, and a repeated dry run is idempotent.
+
+For the two execution commands this is a **plan-only** boundary: `task run --dry-run` resolves and
+validates the attempt and reports the deterministic risk gate, any approval already on record, and the
+capability envelope, then stops before the first event, session, decision or model call;
+`task orchestrate --dry-run` builds the deterministic plan (extracted requirements, eligible models and
+the plan variants the mode permits) and stops before the task is started or any session, decision or
+model call happens.
+
 ## Try it
 
 The CLI runs against a project directory. Build once, then run it from the project you want to
@@ -62,7 +86,7 @@ A high-risk task stops for a human, and the grant is consumed when work resumes:
 ```sh
 node <path-to-this-repo>/dist/cli/run.js task create --title "Rotate the signing key" \
   --description "Replace the release key" --acceptance "A release is signed" --risk high
-node <path-to-this-repo>/dist/cli/run.js task run <task-id>          # awaiting-approval (exit 1)
+node <path-to-this-repo>/dist/cli/run.js task run <task-id>          # awaiting-approval (exit 5)
 node <path-to-this-repo>/dist/cli/run.js approvals                   # shows the pending request
 node <path-to-this-repo>/dist/cli/run.js task approve <task-id> --approver me --resume
 node <path-to-this-repo>/dist/cli/run.js task trace <task-id>         # asked, granted, consumed
@@ -87,8 +111,8 @@ observability, AI budgets, workspace isolation, policy and human approval.
 - `docs/architecture/V2-ARCHITECTURE.md` — the V2 architecture RFC (design).
 - `docs/architecture/DECISIONS.md` — the architectural decisions behind it (ADRs).
 
-Status: **Phase G** is implemented and verified. On top of Phase C's domain, append-only JSONL event
-log, project-scoped CLI and event-derived token/cost/budget reporting, Phase D added:
+Status: **Phase H** is implemented and verified locally. On top of Phase C's domain, append-only JSONL
+event log, project-scoped CLI and event-derived token/cost/budget reporting, Phase D added:
 
 - **One real LLM provider adapter** (OpenAI-compatible Chat Completions), selected in
   `.ai/project.json`. The credential is named there and read from the environment at call time —
@@ -145,7 +169,8 @@ admission → approval → the boundary performing it`. A capable runtime is han
   `ai task approve --resume` consumes the grant once, and a capability policy denies can never be
   reached by approving it.
 - **`ai policy`** shows the effect table and the envelope; **`ai policy --check --capability … --target
-…`** runs the identical evaluation and performs nothing (exit 0 allowed, 1 denied, 2 uninterpretable).
+…`** runs the identical evaluation and performs nothing (exit 0 allowed, 1 denied, 2 uninterpretable — this
+  is the policy-query contract; task-execution outcomes use 3/4/5, see Exit codes above).
   The trace gains `POLICY` and `OPERATIONS` sections, and `ai doctor` probes the boundary offline.
 
 It is **not a container, VM or kernel boundary**, and it does not protect against an already-compromised
@@ -182,17 +207,58 @@ enforcement or into the model prompt.
 - **`ai decision [--json]`** reports the layer, its limits, its per-question fallback policy and the
   decisions recorded in this scope; **`ai task decisions <task-id> [--json]`** lists every bounded
   question a task asked and how it was answered. Neither calls a provider.
+- **Acceptance has two authorities and they stay distinguishable.** A criterion the author bound to a
+  suite or a named check is assessed from that verification; a criterion no check can decide is
+  established by a person with `ai task verdict <task-id> --criterion <AC-n> --status
+<met|not-met|waived> --by <name>`, recorded as a human act with its transition and replacing the
+  machine's evidence rather than sitting beside it (ADR-060, ADR-062). Closing the task is still a
+  separate human action.
 
-Still designed but **not implemented**: a real agent runtime (the bundled runner is simulated — it
-makes real provider calls and one real, policy-checked workspace listing but performs no engineering
-work), engineering memory, a context cache, embeddings/semantic search, multi-model routing, plugins,
-replay, container/remote execution and the dashboard. See §33 and §35–§38 of the RFC, and the honesty
-statement in `DECISIONS.md`.
+Phase H adds the **multi-model frontier**: one provider and one model became a registry of declared
+models, and routing became a pipeline rather than a guess.
 
-**Queued and explicitly not started** (§33.1): a multi-model orchestration phase — a model registry
-with capability, cost and latency profiles plus a second provider adapter — and, separately, a real
-OS/container execution boundary. Neither changes the frozen order: Phase G (the decision layer) is
-current, Phase H is semantic retrieval, and no new phase begins until Phase G is frozen and verified.
+- **The registry is knowledge, not authority.** Models declare capabilities, modalities, a latency
+  class, a lifecycle and an availability window, and configuration names which provider serves which
+  model. The registry answers "who could do this?" — never "who may?" (policy) or "who should?" (the
+  decision layer).
+- **Code filters and orders; the decision layer may only reorder.** Requirements are extracted
+  deterministically against closed vocabularies, eligibility is rejected in a fixed order, four
+  routing modes build an explicit key list, and a decision that reorders candidates must return a
+  _permutation_ of what it was offered — it cannot add, drop or resurrect one.
+- **Unsupported work fails explicitly.** An unregistered model, a model attributed to the wrong
+  provider, a provider that does not serve it, and a requirement nothing satisfies are all refusals
+  with stable codes. A model is never silently substituted, because the trace would then lie about
+  which model ran; identity is always the requested model id.
+- **`ai task orchestrate <task-id>`** plans and runs one step of the frontier; **`ai models [--json]`**
+  prints the catalog, its declared capabilities and its current availability. The plan is recorded
+  _before_ any call, so a run that dies mid-step still explains what it intended.
+- **Availability is a declared window** (`operational.availableFrom`) judged against the runtime's
+  injected clock (ADR-057), so a launch-gated model becomes routable on its own rather than failing a
+  task that selected it.
+
+**Met locally, and not more than that** — the verification pipeline is green and the frontier has been
+exercised end to end, but the phase is **not declared frozen**: the CI gate runs on `main` and has
+never seen this branch. A required comparative benchmark against a single-model baseline now exists
+and has been run (a measurement of the §29.1 dimensions, not a verdict — §39.10). Reported in full in
+§39 of the RFC and ADR-058.
+
+The **agent runtime is selected per project**. The default is simulated — real provider calls and one
+real, policy-checked workspace listing but no engineering work (`ai doctor` warns about it); configuring
+`agent.runner: "change-set"` selects a bounded real coding path whose writes and verification run
+through the operation gateway, with a task's acceptance criteria able to bind to a suite or a named
+check and be assessed from that evidence (ADR-059, ADR-060), and a criterion no check can decide
+established by a named person through an explicit, recorded verdict (ADR-062). Still designed but
+**not implemented**: a full autonomous agent loop (the change-set runner is one-shot, with no repair
+loop or rollback), engineering memory, a context cache, embeddings/semantic search, plugins, replay,
+container/remote execution and the dashboard. See §33 and §35–§39 of the RFC, and the honesty statement
+in `DECISIONS.md`. Dated reconciliation notes — where a later phase amended an earlier claim — are
+collected in `docs/architecture/RECONCILIATIONS.md`.
+
+**Recorded proposals** (§33.1): the multi-model orchestration proposal listed there has since been
+delivered as **Phase H** (ADR-058, §39), and the roadmap letters were reassigned when that happened —
+semantic retrieval is now Phase I and the optional dashboard Phase J. Still queued and explicitly not
+started is a real OS/container execution boundary: Phase F's boundaries are in-process and labelled
+as such, and kernel-level isolation is a later architectural phase.
 
 ## Scope
 

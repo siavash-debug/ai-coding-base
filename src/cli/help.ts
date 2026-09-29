@@ -57,6 +57,11 @@ export const COMMANDS: readonly {
     summary: "show estimated cost and what is unpriced",
   },
   {
+    name: "ai task verdict <task-id>",
+    summary:
+      "record a human verdict on an acceptance criterion (--by is required)",
+  },
+  {
     name: "ai task complete <task-id>",
     summary: "close a reviewed task (a human act)",
   },

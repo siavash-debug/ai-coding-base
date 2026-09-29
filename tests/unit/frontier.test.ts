@@ -194,7 +194,10 @@ describe("resolution", () => {
   it("keys the step on the requested model, not the name the provider reports", async () => {
     const transport = createFakeTransport([
       jsonResponse(
-        chatCompletionBody({ model: "vendor/normalised-name", content: "done" }),
+        chatCompletionBody({
+          model: "vendor/normalised-name",
+          content: "done",
+        }),
       ),
     ]);
     const provider = createOpenAiCompatibleProvider({

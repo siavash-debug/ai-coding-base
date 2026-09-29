@@ -152,9 +152,7 @@ export function createGuardedNetwork(
    * guard forwards streaming only when the thing it wraps actually streams, rather
    * than advertising a capability it would then have to fake.
    */
-  const innerSendStream = options.transport.sendStream?.bind(
-    options.transport,
-  );
+  const innerSendStream = options.transport.sendStream?.bind(options.transport);
 
   const providerTransport: HttpTransport = {
     id: `${options.transport.id}:guarded-provider`,

@@ -46,6 +46,14 @@ export interface ContextSelectRequest {
   readonly sessionId?: SessionId;
   /** Correlates the selection's events with the run that caused it. */
   readonly correlationId?: string;
+  /**
+   * When `false`, the selection is computed and returned but no event is written.
+   *
+   * Defaults to `true`: a selection is normally a fact about a task and the engine
+   * records it. The one caller that sets this is `ai task context --select --dry-run`,
+   * where writing the selection would defeat the point of the dry run.
+   */
+  readonly record?: boolean;
 }
 
 /**

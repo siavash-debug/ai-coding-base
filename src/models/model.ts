@@ -1,4 +1,5 @@
 import { DomainError } from "../core/errors.js";
+import { isValidIsoTimestamp } from "../core/clock.js";
 import {
   assertNonEmptyString,
   assertNonNegativeInteger,
@@ -167,6 +168,74 @@ export function lifecycleRank(state: ModelLifecycleState | undefined): number {
   }
 }
 
+export const MODEL_AVAILABILITY_STATES = [
+  "available",
+  "not-yet-available",
+] as const;
+export type ModelAvailabilityState = (typeof MODEL_AVAILABILITY_STATES)[number];
+
+export interface ModelAvailability {
+  readonly state: ModelAvailabilityState;
+  /** The declared instant. Present only when the profile declares a window. */
+  readonly availableFrom?: string;
+}
+
+/**
+ * Whether a declared availability window has opened at `now`.
+ *
+ * The instant arrives as a **parameter**, not from a clock, so this stays a pure
+ * function: the same profile and the same instant always produce the same answer, and
+ * a process replaying last week's trace evaluates the window at the time it is
+ * replaying rather than at the time it happens to be running. Time is therefore an
+ * input the caller must supply — and a caller that cannot supply one is refusing to
+ * answer, not asserting "available".
+ *
+ * This says nothing about `enabled`. An operator's refusal and a vendor's window are
+ * different facts held in different fields, so neither can be read as the other, and a
+ * window never turns on a model its operator turned off.
+ */
+export function modelAvailability(
+  model: ModelProfile,
+  now: string,
+): ModelAvailability {
+  const availableFrom = model.operational?.availableFrom;
+  if (availableFrom === undefined) {
+    return { state: "available" };
+  }
+  if (!isValidIsoTimestamp(now)) {
+    // A comparison against an unparseable instant would be `NaN >= x`, which is
+    // `false`, which reads as *closed* — a fact produced by arithmetic on garbage.
+    throw new DomainError(
+      "VALIDATION",
+      "An availability window cannot be judged without a valid ISO-8601 instant",
+      { field: "now" },
+    );
+  }
+  return {
+    state:
+      Date.parse(now) >= Date.parse(availableFrom)
+        ? "available"
+        : "not-yet-available",
+    availableFrom,
+  };
+}
+
+/**
+ * The availability of a whole catalog at one instant, keyed by model id.
+ *
+ * Batched rather than called per model by whoever is drawing a list, because a caller
+ * that read the clock once per model could render a catalog straddling a window that
+ * opened halfway through — one list, two answers. One instant, one verdict per model.
+ */
+export function modelAvailabilityAt(
+  models: readonly ModelProfile[],
+  now: string,
+): ReadonlyMap<string, ModelAvailability> {
+  return new Map(
+    models.map((model) => [model.modelId, modelAvailability(model, now)]),
+  );
+}
+
 /**
  * Domain specialisations: a smaller, closed vocabulary than capabilities.
  *
@@ -209,6 +278,19 @@ export interface ModelOperationalProfile {
   readonly status?: ModelLifecycleState;
   /** ISO date (`YYYY-MM-DD`) the vendor announced the model ends. Only when announced. */
   readonly sunsetAt?: string;
+  /**
+   * ISO-8601 instant at which a vendor's availability window opens, when one was
+   * announced. A launch event with a published start is a fact about the model, not a
+   * preference of the operator's, so it is declared here rather than expressed by
+   * turning `enabled` on and off by hand.
+   *
+   * `enabled` says the operator *wants* to route to this model; this says when that
+   * wish may first be honoured. Declaring a window is therefore how a model is
+   * registered before it is reachable: until the instant passes it is not a candidate,
+   * so no plan spends a call on a model the provider would refuse. Absent means no
+   * declared window — the absence of a claim, which gates nothing.
+   */
+  readonly availableFrom?: string;
   /** Operator-declared coarse class. Never a measured rate or a promise. */
   readonly rateLimitClass?: string;
 }
@@ -439,6 +521,27 @@ function assertSunsetDate(value: unknown, field: string): string {
 }
 
 /**
+ * An availability instant is validated as a *timestamp*, not a date.
+ *
+ * A window opens at a moment, and the moment is the vendor's; accepting
+ * `2026-09-25` would mean picking a time of day on the operator's behalf, and midnight
+ * UTC is a guess this module does not make. Validation still consults no clock: the
+ * pattern is a fact about the string, and *evaluating* the window is a separate
+ * function that takes the instant as a parameter.
+ */
+function assertAvailabilityInstant(value: unknown, field: string): string {
+  const text = assertNonEmptyString(value, field);
+  if (!isValidIsoTimestamp(text)) {
+    throw new DomainError(
+      "VALIDATION",
+      `${field} must be an ISO-8601 timestamp (e.g. 2026-09-25T17:00:00Z)`,
+      { field },
+    );
+  }
+  return text;
+}
+
+/**
  * Lifecycle, tier and rate-limit class.
  *
  * Every field is optional and nothing is defaulted: a profile that declares no tier
@@ -468,6 +571,13 @@ function assertOperationalProfile(
     candidate["sunsetAt"] === undefined
       ? undefined
       : assertSunsetDate(candidate["sunsetAt"], `${field}.sunsetAt`);
+  const availableFrom =
+    candidate["availableFrom"] === undefined
+      ? undefined
+      : assertAvailabilityInstant(
+          candidate["availableFrom"],
+          `${field}.availableFrom`,
+        );
   const rateLimitClass =
     candidate["rateLimitClass"] === undefined
       ? undefined
@@ -476,6 +586,7 @@ function assertOperationalProfile(
     ...(free === undefined ? {} : { free }),
     ...(status === undefined ? {} : { status }),
     ...(sunsetAt === undefined ? {} : { sunsetAt }),
+    ...(availableFrom === undefined ? {} : { availableFrom }),
     ...(rateLimitClass === undefined ? {} : { rateLimitClass }),
   };
 }

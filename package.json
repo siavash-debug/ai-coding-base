@@ -17,6 +17,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.check.json",
     "test": "vitest run",
     "build": "tsc -p tsconfig.json",
+    "docs:reconciliations": "node scripts/reconciliation-notes.ts",
     "verify": "bash scripts/verify.sh",
     "git:identity": "bash scripts/check-git-identity.sh",
     "ai": "node ./dist/cli/run.js"

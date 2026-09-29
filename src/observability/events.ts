@@ -58,6 +58,12 @@ import {
   type TerminalAgentSessionStatus,
 } from "../sessions/agent-session.js";
 import { TASK_STATUSES, type TaskStatus } from "../tasks/lifecycle.js";
+import {
+  ACCEPTANCE_CRITERION_STATUSES,
+  ACCEPTANCE_VERDICT_STATUSES,
+  type AcceptanceCriterionStatus,
+  type AcceptanceVerdictStatus,
+} from "../tasks/task.js";
 import { type AIUsage, assertValidUsage } from "./usage.js";
 
 /**
@@ -101,6 +107,8 @@ export const EVENT_TYPES = [
   "OperationDenied",
   "SandboxViolation",
   "OrchestrationPlanned",
+  "AcceptanceAssessed",
+  "AcceptanceVerdictRecorded",
 ] as const;
 
 export type EventType = (typeof EVENT_TYPES)[number];
@@ -164,6 +172,37 @@ export interface EventPayloadMap {
     readonly reason: string;
     readonly acceptanceCriteriaMet: number;
     readonly acceptanceCriteriaTotal: number;
+  };
+  /**
+   * One deterministic assessment of `pending`, explicitly bound acceptance criteria
+   * from recorded verification evidence (see `assessAcceptanceCriteria`).
+   *
+   * Recorded so the criterion statuses on the task projection are reproducible from
+   * the log: `criteria` holds `<criterion-id>:<met|not-met>:<suite>` references, or
+   * `<criterion-id>:<met|not-met>:<suite>:<check>` when the criterion was bound to a
+   * named check, and the matching `TestCompleted` event carries the check counts. No
+   * content, no prose, and no criterion that was not bound to a suite appears here.
+   */
+  AcceptanceAssessed: {
+    readonly assessed: number;
+    readonly met: number;
+    readonly notMet: number;
+    readonly criteria: readonly string[];
+  };
+  /**
+   * One explicit human verdict on one acceptance criterion.
+   *
+   * The counterpart of `AcceptanceAssessed` for the platform's other authority: a
+   * person. `from`/`to` make it a transition rather than a snapshot, so the log shows
+   * what changed and what it changed from, and `verdictBy` names who took
+   * responsibility — which is what keeps "this criterion is `waived` because alice said
+   * so" from being confusable with a status a verification produced (ADR-062).
+   */
+  AcceptanceVerdictRecorded: {
+    readonly criterionId: string;
+    readonly from: AcceptanceCriterionStatus;
+    readonly to: AcceptanceVerdictStatus;
+    readonly verdictBy: string;
   };
   ContextSelectionStarted: {
     readonly selectionId: string;
@@ -337,9 +376,17 @@ export interface EventPayloadMap {
   };
   TestStarted: {
     readonly suite: string;
+    /** The named check this run belongs to, when the runtime ran one. */
+    readonly check?: string;
   };
   TestCompleted: {
     readonly suite: string;
+    /**
+     * Stable named-check identity, present only when the runtime ran a named check
+     * rather than a whole suite. It is what lets a criterion's `verifiedBy.check` be
+     * joined to exactly one deterministic result.
+     */
+    readonly check?: string;
     readonly passed: number;
     readonly failed: number;
     readonly durationMs?: number;
@@ -544,6 +591,8 @@ type PayloadFieldKind =
   | "decisionOutcome"
   | "checkpointReason"
   | "taskStatus"
+  | "acceptanceCriterionStatus"
+  | "acceptanceVerdictStatus"
   | "sessionStatus"
   | "failureKind"
   | "contentPresence"
@@ -622,6 +671,18 @@ const EVENT_PAYLOAD_RULES: Readonly<
     text("reason"),
     count("acceptanceCriteriaMet"),
     count("acceptanceCriteriaTotal"),
+  ],
+  AcceptanceAssessed: [
+    count("assessed"),
+    count("met"),
+    count("notMet"),
+    refs("criteria"),
+  ],
+  AcceptanceVerdictRecorded: [
+    text("criterionId"),
+    enumField("from", "acceptanceCriterionStatus"),
+    enumField("to", "acceptanceVerdictStatus"),
+    text("verdictBy"),
   ],
   ContextSelectionStarted: [
     text("selectionId"),
@@ -729,9 +790,10 @@ const EVENT_PAYLOAD_RULES: Readonly<
     enumField("operation", "operation", true),
     count("latencyMs", true),
   ],
-  TestStarted: [text("suite")],
+  TestStarted: [text("suite"), text("check", true)],
   TestCompleted: [
     text("suite"),
+    text("check", true),
     count("passed"),
     count("failed"),
     count("durationMs", true),
@@ -1002,6 +1064,12 @@ function validatePayload(type: EventType, payload: unknown): void {
         break;
       case "taskStatus":
         assertOneOf(value, TASK_STATUSES, field);
+        break;
+      case "acceptanceCriterionStatus":
+        assertOneOf(value, ACCEPTANCE_CRITERION_STATUSES, field);
+        break;
+      case "acceptanceVerdictStatus":
+        assertOneOf(value, ACCEPTANCE_VERDICT_STATUSES, field);
         break;
       case "sessionStatus":
         assertOneOf(value, TERMINAL_AGENT_SESSION_STATUSES, field);

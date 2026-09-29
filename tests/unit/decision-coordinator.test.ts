@@ -73,6 +73,7 @@ function coordinatorFor(
       readonly maxDecisionsPerTask?: number;
       readonly maxRetriesPerTask?: number;
       readonly maxDecisionCostMicrosPerTask?: number;
+      readonly minCompletionConfidence?: number;
     };
     readonly rates?: readonly ModelRate[];
     readonly taskId?: string;
@@ -368,6 +369,88 @@ describe("decision coordinator: budget", () => {
     expect(state.exhausted).toBe(true);
   });
 
+  it("reserves the closing slot for the completion question", async () => {
+    const provider = createScriptedDecisionProvider([
+      { response: { outcome: "selected", optionId: "minimal" } },
+      { response: { outcome: "selected", optionId: "complete" } },
+    ]);
+    const subject = await project(provider);
+    const stored = await taskIn(subject);
+    const coordinator = coordinatorFor(subject, {
+      provider,
+      config: { maxDecisionsPerTask: 2 },
+    }).forAttempt({
+      workspaceId: subject.runtime.workspace.id,
+      taskId: stored.task.id,
+    });
+
+    // The first of the two slots belongs to the iterative questions...
+    await coordinator.route({
+      taskRiskLevel: "medium",
+      routes: ["standard", "minimal"],
+    });
+    expect(provider.calls).toBe(1);
+    // ...and the second is the reserve, so an iterative question yields it.
+    await coordinator.assessRisk({
+      operation: "write",
+      baselineRisk: "medium",
+    });
+    expect(provider.calls).toBe(1);
+
+    // The closing assessment still reaches the layer, because its slot was reserved.
+    const completion = await coordinator.assessCompletion({
+      acceptanceCriteriaTotal: 1,
+      verificationChecks: 1,
+      verificationFailures: 0,
+    });
+    expect(provider.calls).toBe(2);
+    expect(completion.meta.answeredBy).toBe("provider");
+    expect(completion.assessment).toBe("complete");
+  });
+
+  it("keeps the declared cap hard when it reserves the closing slot", async () => {
+    const provider = createScriptedDecisionProvider([
+      { response: { outcome: "selected", optionId: "medium" } },
+      { response: { outcome: "selected", optionId: "medium" } },
+      { response: { outcome: "selected", optionId: "incomplete" } },
+    ]);
+    const subject = await project(provider);
+    const stored = await taskIn(subject);
+    const coordinator = coordinatorFor(subject, {
+      provider,
+      config: { maxDecisionsPerTask: 3 },
+    }).forAttempt({
+      workspaceId: subject.runtime.workspace.id,
+      taskId: stored.task.id,
+    });
+
+    // Two iterative questions spend the two slots that are not reserved; a third
+    // yields rather than reaching the provider.
+    for (let index = 0; index < 3; index += 1) {
+      await coordinator.assessRisk({
+        operation: "write",
+        baselineRisk: "medium",
+      });
+    }
+    expect(provider.calls).toBe(2);
+
+    const completion = await coordinator.assessCompletion({
+      acceptanceCriteriaTotal: 1,
+      verificationChecks: 1,
+      verificationFailures: 0,
+    });
+    expect(completion.meta.answeredBy).toBe("provider");
+
+    // The reserve carves the cap; it does not raise it. Three is still the ceiling,
+    // and the escalation that follows the closing question yields to it.
+    expect(provider.calls).toBe(3);
+    await coordinator.recommendEscalation({
+      facts: ["completion:incomplete"],
+      securityRefusal: false,
+    });
+    expect(provider.calls).toBe(3);
+  });
+
   it("stops consulting the layer once the known cost reaches the cost cap", async () => {
     const provider = createMetadataDecisionProvider(
       [
@@ -616,6 +699,97 @@ describe("decision coordinator: bounded answers", () => {
         (event) => (event.payload as { to?: string }).to === "completed",
       ),
     ).toHaveLength(0);
+  });
+
+  it("withholds a low-confidence completion verdict but records the answer it gave", async () => {
+    const provider = createMetadataDecisionProvider([
+      {
+        metadata: {
+          response: {
+            outcome: "selected",
+            optionId: "complete",
+            reasonCode: "criteria-met",
+            confidence: 0.65,
+          },
+          usage: DECISION_USAGE,
+        },
+      },
+    ]);
+    const subject = await project(provider);
+    const stored = await taskIn(subject);
+    const coordinator = coordinatorFor(subject, { provider }).forAttempt({
+      workspaceId: subject.runtime.workspace.id,
+      taskId: stored.task.id,
+    });
+
+    const assessment = await coordinator.assessCompletion({
+      acceptanceCriteriaTotal: 1,
+      acceptanceCriteriaMet: 1,
+      verificationChecks: 1,
+      verificationFailures: 0,
+    });
+
+    // The verdict the application may act on is withheld...
+    expect(assessment.assessment).toBe("uncertain");
+    expect(assessment.confidenceGated).toBe(true);
+    expect(assessment.reportedAssessment).toBe("complete");
+
+    // ...while the layer's own answer is still in the log, at the confidence it gave
+    // it with. The gate is applied *above* the record, so an operator can always tell
+    // "the layer said complete" from "nothing acted on it".
+    const events = await subject.runtime.store.readByTask(
+      scopeOf(subject),
+      stored.task.id,
+    );
+    const completed = eventsOfType(events, "DecisionCompleted");
+    expect(completed).toHaveLength(1);
+    const payload = completed[0]!.payload as Record<string, unknown>;
+    expect(payload["selectedOptionId"]).toBe("complete");
+    expect(payload["confidence"]).toBe(0.65);
+  });
+
+  it("takes the completion confidence threshold from project configuration", async () => {
+    const answer = {
+      response: {
+        outcome: "selected",
+        optionId: "complete",
+        reasonCode: "criteria-met",
+        confidence: 0.6,
+      },
+    } as const;
+    const provider = createScriptedDecisionProvider([answer, answer]);
+    const subject = await project(provider);
+    const stored = await taskIn(subject);
+    const scope = {
+      workspaceId: subject.runtime.workspace.id,
+      taskId: stored.task.id,
+    };
+    const asked = {
+      acceptanceCriteriaTotal: 1,
+      acceptanceCriteriaMet: 1,
+      verificationChecks: 1,
+      verificationFailures: 0,
+    };
+
+    // The same answer is accepted where the project says 0.6 is enough...
+    const lenient = await coordinatorFor(subject, {
+      provider,
+      config: { minCompletionConfidence: 0.5 },
+    })
+      .forAttempt(scope)
+      .assessCompletion(asked);
+    expect(lenient.assessment).toBe("complete");
+    expect(lenient.confidenceGated).toBe(false);
+
+    // ...and withheld where the project says it is not.
+    const strict = await coordinatorFor(subject, {
+      provider,
+      config: { minCompletionConfidence: 0.9 },
+    })
+      .forAttempt(scope)
+      .assessCompletion(asked);
+    expect(strict.assessment).toBe("uncertain");
+    expect(strict.confidenceGated).toBe(true);
   });
 
   it("refuses a question carrying secret-shaped context before asking anyone", async () => {

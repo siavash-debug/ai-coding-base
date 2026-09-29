@@ -130,6 +130,12 @@ export interface CompletionDecisionRequest {
    * allowed to see the difference.
    */
   readonly acceptanceCriteriaMet?: number;
+  /**
+   * Criteria the task declares that are not established as satisfied, counted from the
+   * record. Absent means the caller did not supply the count and the question derives
+   * it — never that there are none (`decisions/domains.ts`).
+   */
+  readonly acceptanceCriteriaPending?: number;
   readonly verificationChecks: number;
   readonly verificationFailures: number;
 }
@@ -221,6 +227,29 @@ function consultationsIn(events: readonly DomainEvent[]): {
   }
   return { consultations, knownCostMicros };
 }
+
+/**
+ * The one question whose answer a human acts on directly.
+ *
+ * `completion` is asked exactly once, at the end, after every other question, and the
+ * assessment it returns is what a reviewer reads when deciding whether the work is
+ * done. Every other question here is iterative and advisory — routing once per
+ * attempt, risk once per tool step, retry per failure — and each has a conservative
+ * deterministic fallback, so it is those that should yield when the budget runs short.
+ * Reserving the closing slot for `completion` keeps the terminal judgement from being
+ * starved by the questions that precede it.
+ */
+const CLOSING_DECISION_DOMAIN: DomainDecisionSpec["domain"] = "completion";
+/**
+ * Slots withheld from every other question so the closing assessment always has one.
+ *
+ * The reserve is a *carve-out*, not an increase: non-closing questions are bounded to
+ * `limit - CLOSING_DECISION_RESERVE`, so the number of provider consultations a task
+ * can cause is still capped by `maxDecisionsPerTask` (ADR-055, ADR-056). With a
+ * declared limit below 2 there is no room to reserve, and the cap is the whole budget;
+ * the closing fallback remains deterministic and is still recorded.
+ */
+const CLOSING_DECISION_RESERVE = 1;
 
 export function createDecisionCoordinatorFactory(
   deps: DecisionCoordinatorFactoryDeps,
@@ -379,7 +408,19 @@ export function createDecisionCoordinatorFactory(
         readonly decision: Decision;
       }> {
         const budget = await state();
-        const skipReason: DecisionFallbackReason | undefined = budget.exhausted
+        // The closing assessment keeps a reserved slot; every other question yields it.
+        // An exhausted *cost* cap still stops even the closing question: the reserve
+        // apportions a consultation *count*, it does not override a spend ceiling.
+        const reserve =
+          spec.domain === CLOSING_DECISION_DOMAIN
+            ? 0
+            : CLOSING_DECISION_RESERVE;
+        const effectiveLimit = Math.max(1, budget.limit - reserve);
+        const overCost =
+          budget.costCapMicros !== undefined &&
+          budget.knownCostMicros >= budget.costCapMicros;
+        const exhausted = overCost || budget.consultations >= effectiveLimit;
+        const skipReason: DecisionFallbackReason | undefined = exhausted
           ? "budget-exhausted"
           : undefined;
         const decision = await deps.decisions.ask(
@@ -605,12 +646,21 @@ export function createDecisionCoordinatorFactory(
           const spec = buildCompletionSpec({
             acceptanceCriteriaTotal: input.acceptanceCriteriaTotal,
             acceptanceCriteriaMet: input.acceptanceCriteriaMet,
+            acceptanceCriteriaPending: input.acceptanceCriteriaPending,
             verificationChecks: input.verificationChecks,
             verificationFailures: input.verificationFailures,
             context: baseContext(),
           });
           const { outcome, decision } = await evaluateSpec(spec);
-          return interpretCompletion(outcome, metaFor(outcome, decision));
+          // The threshold is the project's, and it is applied here rather than inside
+          // the spec because the spec is the *question* and this is *policy about the
+          // answer*: a gated verdict must still be asked, recorded and priced as the
+          // answer it was.
+          return interpretCompletion(
+            outcome,
+            metaFor(outcome, decision),
+            deps.config.minCompletionConfidence,
+          );
         },
 
         async recommendEscalation(input) {

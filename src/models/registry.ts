@@ -1,9 +1,11 @@
+import { type Clock, toIsoString } from "../core/clock.js";
+import { DomainError } from "../core/errors.js";
 import type {
   ModelEligibility,
   ModelProfile,
   ModelRequirements,
 } from "./model.js";
-import { isUsableHealth, modelSatisfies } from "./model.js";
+import { isUsableHealth, modelAvailability, modelSatisfies } from "./model.js";
 
 /**
  * The model registry: what models exist, what they can do, and which of them may be
@@ -23,7 +25,14 @@ import { isUsableHealth, modelSatisfies } from "./model.js";
 
 export interface RejectedModel {
   readonly modelId: string;
-  /** `disabled`, `health:<state>`, `role-mismatch` or `capability-mismatch`. */
+  /**
+   * `disabled`, `not-available-yet`, `health:<state>`, `role-mismatch` or
+   * `capability-mismatch`.
+   *
+   * `disabled` and `not-available-yet` are deliberately distinct. Both keep a model
+   * out of the candidate set, and they call for opposite responses: one is a decision
+   * of the operator's to revisit, the other is a window that opens on its own.
+   */
   readonly reasonCode: string;
   /** Missing role/capability/specialization/modality codes, on a mismatch. */
   readonly missing: readonly string[];
@@ -70,9 +79,32 @@ function compareModels(a: ModelProfile, b: ModelProfile): number {
 export interface ModelRegistryDeps {
   readonly models: readonly ModelProfile[];
   readonly id?: string;
+  /**
+   * The clock a declared availability window is judged against.
+   *
+   * Required only when some profile declares a window: a catalog with no gated model
+   * has no availability question to answer, so a caller that never registered one is
+   * not forced to supply time it would not use. A catalog that *does* declare a window
+   * and arrives without a clock is refused at construction — see below — because the
+   * alternative is a registry that quietly answers "no" about a model whose window may
+   * already have opened.
+   */
+  readonly clock?: Clock;
 }
 
 export function createModelRegistry(deps: ModelRegistryDeps): ModelRegistry {
+  const gated = deps.models.filter(
+    (model) => model.operational?.availableFrom !== undefined,
+  );
+  if (gated.length > 0 && deps.clock === undefined) {
+    throw new DomainError(
+      "VALIDATION",
+      `cannot judge an availability window without a clock: ` +
+        `${gated.map((model) => model.modelId).join(", ")} declare(s) one`,
+      { field: "clock" },
+    );
+  }
+
   const seen = new Set<string>();
   const order: string[] = [];
   const byId = new Map<string, ModelProfile>();
@@ -105,11 +137,33 @@ export function createModelRegistry(deps: ModelRegistryDeps): ModelRegistry {
     eligible(requirements) {
       const eligible: ModelProfile[] = [];
       const rejected: RejectedModel[] = [];
+      // Read on every question rather than resolved once at construction: a window
+      // that opens while this process is running must open for this process too, and a
+      // value frozen at startup would be wrong in exactly the direction that matters —
+      // a gated model staying invisible after the vendor started serving it.
+      const now = deps.clock?.now();
       for (const model of sorted()) {
         if (!model.enabled) {
+          // Reported before availability, because a refusal is the first honest reason
+          // for a model nobody wants routed to: which window it sits in is not the
+          // operator's next question.
           rejected.push({
             modelId: model.modelId,
             reasonCode: "disabled",
+            missing: [],
+          });
+          continue;
+        }
+        const availability =
+          now === undefined
+            ? undefined
+            : modelAvailability(model, toIsoString(now));
+        if (availability?.state === "not-yet-available") {
+          // Enabled by its operator and not yet served by its vendor: not a decision to
+          // revisit, so it is not reported as one.
+          rejected.push({
+            modelId: model.modelId,
+            reasonCode: "not-available-yet",
             missing: [],
           });
           continue;

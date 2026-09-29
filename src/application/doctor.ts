@@ -18,7 +18,7 @@ import { createFileRepositoryReader } from "../adapters/repository/file-reposito
 import { createFileAppendLock } from "../adapters/storage/file-append-lock.js";
 import { createJsonlEventStore } from "../adapters/storage/jsonl-event-store.js";
 import { isSecretShapedPath, parseIgnoreRules } from "../context/ignore.js";
-import type { Clock } from "../core/clock.js";
+import { type Clock, toIsoString } from "../core/clock.js";
 import { isDomainError } from "../core/errors.js";
 import {
   createSequentialIdFactory,
@@ -37,8 +37,11 @@ import {
 } from "../policy/path-boundary.js";
 import { urlHost } from "../adapters/sandbox/guarded-network.js";
 import type { OperationRequest } from "../ports/operation.js";
+import type { ProjectScope } from "../ports/scope.js";
+import { modelAvailabilityAt } from "../models/model.js";
 import { createProject } from "../projects/project.js";
 import { createWorkspace } from "../workspaces/workspace.js";
+import { replayAcceptance } from "./acceptance-replay.js";
 import { createDeterministicContextEngine } from "./context-engine.js";
 import { createEventRecorder } from "./event-recorder.js";
 import {
@@ -324,7 +327,9 @@ function checkDecisionLayer(
   const info = runtime.decisionEngine;
   const budget =
     `${config.maxDecisionsPerTask} consultation(s) per task, ` +
-    `${config.maxRetriesPerTask} attempt-level retr(ies)`;
+    `${config.maxRetriesPerTask} attempt-level retr(ies), ` +
+    `completion verdicts withheld below confidence ` +
+    `${config.minCompletionConfidence}`;
   if (!info.configured) {
     return {
       id: "decision-layer",
@@ -481,8 +486,29 @@ function checkFrontier(
     }
   }
 
+  // A model can be enabled by its operator and still not be routable yet, because the
+  // vendor's availability window has not opened. Reporting it as merely "enabled" would
+  // read as a model that could be called now, so the pending ones are named separately.
+  const availability = modelAvailabilityAt(
+    models,
+    toIsoString(runtime.clock.now()),
+  );
+  const pending = enabledModels.filter(
+    (model) => availability.get(model.modelId)?.state === "not-yet-available",
+  );
+  const pendingNote =
+    pending.length === 0
+      ? ""
+      : `; enabled but not yet available: ${pending
+          .map(
+            (model) =>
+              `${model.modelId} from ${String(model.operational?.availableFrom)}`,
+          )
+          .join(", ")}`;
+
   const detail =
-    `${catalog}; enabled models: ${enabledModels.map((model) => model.modelId).join(", ")}; ` +
+    `${catalog}; enabled models: ${enabledModels.map((model) => model.modelId).join(", ")}` +
+    `${pendingNote}; ` +
     `capabilities: ${capabilities.join(", ")}` +
     (problems.length === 0 ? "" : `; ${problems.join("; ")}`) +
     (warnings.length === 0 ? "" : `; ${warnings.join("; ")}`);
@@ -1199,6 +1225,109 @@ async function checkEnforcement(
   };
 }
 
+/**
+ * Describes the configured agent runtime honestly, including whether its
+ * verification can produce criterion-level acceptance evidence.
+ *
+ * The offline `simulated` runner is a stand-in and is reported as a warning: it
+ * makes real provider calls but performs no engineering work. A runner that can
+ * mutate the workspace — today the `change-set` runner — is a bounded real coding
+ * path, and its verification is where acceptance evidence comes from. Named checks
+ * are what let a criterion be bound to its own result (ADR-060); with none declared,
+ * acceptance is assessed from the whole-suite command alone, which is the behaviour
+ * that predates named checks. The check reports which of the two is in force rather
+ * than implying that no evidence is produced.
+ */
+function describeAgentRuntime(
+  runtime: Awaited<ReturnType<typeof openRuntime>>,
+): string {
+  if (runtime.runner.kind === "simulated") {
+    return `"${runtime.runner.id}" is a deterministic offline stand-in; no real agent runtime is installed`;
+  }
+  const declared = runtime.config.agent?.verification?.checks ?? [];
+  const evidence =
+    declared.length === 0
+      ? "no named checks are declared, so acceptance is assessed from whole-suite verification only"
+      : `${declared.length} named check(s) can supply criterion-bound acceptance evidence`;
+  return `"${runtime.runner.id}" (${runtime.runner.kind}) is a bounded real coding path; writes and verification run through the operation gateway, and ${evidence}`;
+}
+
+/**
+ * Replays every task's acceptance record from the acceptance events that produced it.
+ *
+ * This is the acceptance half of "the log is the source of truth": `ai task status`
+ * shows what the record says, and this check proves the log agrees with it. The two
+ * events that establish a criterion — `AcceptanceAssessed` from verification the task
+ * author bound the criterion to, and `AcceptanceVerdictRecorded` from a person — are
+ * folded by `replayAcceptance` (`application/acceptance-replay.ts`), which carries the
+ * rules and the one honest limit: an assessment names the evidence it read rather than
+ * restating the counts, so the counts in the record are checked for shape and for
+ * consistency with the status, not for value.
+ *
+ * Read-only: the projections are read, never written, and nothing is appended to the
+ * log. A disagreement is a `fail` rather than a warning, because a record that cannot
+ * be rebuilt from its own history is exactly the corruption this check exists to make
+ * visible — a hand-edited record, a write that landed without its event, or a bug in
+ * the fold. It is reported with the criterion named, never repaired.
+ */
+async function checkAcceptanceReplay(
+  runtime: Awaited<ReturnType<typeof openRuntime>>,
+  scope: ProjectScope,
+  events: readonly DomainEvent[],
+): Promise<DoctorCheck> {
+  const title = "Acceptance replay";
+  try {
+    const records = await runtime.tasks.list(scope);
+    if (records.length === 0) {
+      return {
+        id: "acceptance-replay",
+        title,
+        status: "ok",
+        detail: `no task record yet; the replay path was exercised against an empty scope (${events.length} event(s) in scope)`,
+      };
+    }
+
+    let criteria = 0;
+    let assessments = 0;
+    let verdicts = 0;
+    const findings: string[] = [];
+    for (const record of records) {
+      const replay = replayAcceptance(record.task, events);
+      criteria += replay.criteria;
+      assessments += replay.assessments;
+      verdicts += replay.verdicts;
+      findings.push(...replay.findings);
+    }
+
+    if (findings.length > 0) {
+      const shown = findings.slice(0, 3).join("; ");
+      const more = findings.length > 3 ? ` (+${findings.length - 3} more)` : "";
+      return {
+        id: "acceptance-replay",
+        title,
+        status: "fail",
+        detail: `${records.length} task record(s) replayed from ${assessments} assessment(s) and ${verdicts} verdict(s); ${shown}${more}`,
+      };
+    }
+
+    return {
+      id: "acceptance-replay",
+      title,
+      status: "ok",
+      detail: `${records.length} task record(s), ${criteria} criterion(s) replayed from ${assessments} assessment(s) and ${verdicts} verdict(s); every state, source and evidence identity matches the log (counts are checked for consistency, not restated)`,
+    };
+  } catch (error) {
+    return {
+      id: "acceptance-replay",
+      title,
+      status: "fail",
+      detail: isDomainError(error)
+        ? `${error.code}: ${error.message}`
+        : String(error),
+    };
+  }
+}
+
 export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [
     checkRuntime(deps.runtimeVersion, deps.platform),
@@ -1276,17 +1405,18 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
   }
 
   let eventCount = 0;
+  let scopeEvents: readonly DomainEvent[] = [];
   try {
-    const events = await runtime.store.readAll(scope);
-    eventCount = events.length;
+    scopeEvents = await runtime.store.readAll(scope);
+    eventCount = scopeEvents.length;
     checks.push({
       id: "event-log",
       title: "Project event log",
       status: "ok",
       detail: `${eventCount} event(s) readable in workspace "${runtime.workspace.id}"`,
     });
-    checks.push(checkDecisionAudit(events));
-    checks.push(checkOrchestrationAudit(events));
+    checks.push(checkDecisionAudit(scopeEvents));
+    checks.push(checkOrchestrationAudit(scopeEvents));
   } catch (error) {
     checks.push({
       id: "event-log",
@@ -1323,6 +1453,8 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
     });
   }
 
+  checks.push(await checkAcceptanceReplay(runtime, scope, scopeEvents));
+
   checks.push(
     checkDecisionLayer(runtime, deps.environment ?? createProcessEnvironment()),
   );
@@ -1338,10 +1470,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
     id: "agent-runtime",
     title: "Agent runtime",
     status: runtime.runner.kind === "simulated" ? "warn" : "ok",
-    detail:
-      runtime.runner.kind === "simulated"
-        ? `"${runtime.runner.id}" is a deterministic offline stand-in; no real agent runtime is installed`
-        : `"${runtime.runner.id}" (${runtime.runner.kind})`,
+    detail: describeAgentRuntime(runtime),
   });
 
   checks.push({
@@ -1353,7 +1482,6 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
         ? "no model rates configured; calls will be reported as unpriced, never as $0"
         : `${runtime.modelRates.length} rate(s) configured across ` +
           `${new Set(runtime.modelRates.map((rate) => rate.providerId)).size} provider(s)`,
-
   });
 
   return summarize(deps.projectRoot, checks);

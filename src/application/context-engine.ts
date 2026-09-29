@@ -216,19 +216,24 @@ export function createDeterministicContextEngine(
             }),
       };
       const actor = { type: "system" as const, id: engineId };
+      // A dry run suppresses the write, not the computation: the selection is still
+      // produced and returned, it just is not recorded as a fact about the task.
+      const record = request.record !== false;
 
-      await options.recorder.emit({
-        type: "ContextSelectionStarted",
-        actor,
-        ...scope,
-        payload: {
-          selectionId,
-          strategy: DETERMINISTIC_STRATEGY,
-          selectionVersion: DETERMINISTIC_SELECTION_VERSION,
-          budgetTokens,
-          configFingerprint,
-        },
-      });
+      if (record) {
+        await options.recorder.emit({
+          type: "ContextSelectionStarted",
+          actor,
+          ...scope,
+          payload: {
+            selectionId,
+            strategy: DETERMINISTIC_STRATEGY,
+            selectionVersion: DETERMINISTIC_SELECTION_VERSION,
+            budgetTokens,
+            configFingerprint,
+          },
+        });
+      }
 
       // ---------------------------------------------------------------- discover
       const listing = await options.reader.list();
@@ -636,34 +641,36 @@ export function createDeterministicContextEngine(
         createdAt: toIsoString(options.clock.now()),
       };
 
-      await options.recorder.emit({
-        type: "ContextSelected",
-        actor,
-        ...scope,
-        payload: {
-          selectionId,
-          strategy: selection.strategy,
-          selectionVersion: selection.selectionVersion,
-          configFingerprint,
-          budgetTokens: selection.budgetTokens,
-          candidateTokens: selection.candidateTokens,
-          selectedTokens: selection.selectedTokens,
-          excludedTokens: selection.excludedTokens,
-          remainingTokens: selection.remainingTokens,
-          mandatoryTokens: selection.mandatoryTokens,
-          considered: selection.considered,
-          filteredByScore: selection.filteredByScore,
-          excludedByRules: selection.excludedByRules,
-          budgetExceeded: selection.budgetExceeded,
-          overBudgetTokens: selection.overBudgetTokens,
-          durationMs: selection.durationMs,
-          capabilities: availableCapabilities,
-          unavailableCapabilities,
-          selectedRefs: recordedSelected,
-          excludedRefs: recordedExcluded,
-          refsTruncated,
-        },
-      });
+      if (record) {
+        await options.recorder.emit({
+          type: "ContextSelected",
+          actor,
+          ...scope,
+          payload: {
+            selectionId,
+            strategy: selection.strategy,
+            selectionVersion: selection.selectionVersion,
+            configFingerprint,
+            budgetTokens: selection.budgetTokens,
+            candidateTokens: selection.candidateTokens,
+            selectedTokens: selection.selectedTokens,
+            excludedTokens: selection.excludedTokens,
+            remainingTokens: selection.remainingTokens,
+            mandatoryTokens: selection.mandatoryTokens,
+            considered: selection.considered,
+            filteredByScore: selection.filteredByScore,
+            excludedByRules: selection.excludedByRules,
+            budgetExceeded: selection.budgetExceeded,
+            overBudgetTokens: selection.overBudgetTokens,
+            durationMs: selection.durationMs,
+            capabilities: availableCapabilities,
+            unavailableCapabilities,
+            selectedRefs: recordedSelected,
+            excludedRefs: recordedExcluded,
+            refsTruncated,
+          },
+        });
+      }
 
       return {
         selection,

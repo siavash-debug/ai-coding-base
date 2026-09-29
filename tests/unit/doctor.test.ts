@@ -12,7 +12,10 @@ import {
 } from "../../src/application/doctor.js";
 import type { DoctorCheck } from "../../src/application/doctor.js";
 import { createFixedClock } from "../../src/core/clock.js";
-import { projectConfigPath } from "../../src/adapters/storage/layout.js";
+import {
+  projectConfigPath,
+  tasksDirectory,
+} from "../../src/adapters/storage/layout.js";
 import {
   type Environment,
   createFixedEnvironment,
@@ -132,6 +135,7 @@ describe("ai doctor: a healthy project", () => {
       "decision-audit",
       "orchestration-audit",
       "trace",
+      "acceptance-replay",
       "decision-layer",
       "frontier",
       "enforcement",
@@ -296,6 +300,50 @@ describe("ai doctor: a healthy project", () => {
     expect(pricing.detail).toContain("rate(s) configured");
   });
 
+  it("reports a bounded real coding path, and whether named checks can evidence criteria", async () => {
+    const subject = await project();
+    const path = projectConfigPath(subject.root);
+
+    const writeAgent = async (agent: unknown): Promise<void> => {
+      const config = JSON.parse(await readFile(path, "utf8")) as Record<
+        string,
+        unknown
+      >;
+      config["agent"] = agent;
+      await writeFile(path, JSON.stringify(config, null, 2), "utf8");
+    };
+
+    // With a named check declared, the check reports criterion-bound evidence.
+    await writeAgent({
+      runner: "change-set",
+      verification: {
+        command: "node",
+        args: ["-e", "process.exit(0)"],
+        checks: [
+          {
+            id: "result-fast",
+            command: "node",
+            args: ["-e", "process.exit(0)"],
+          },
+        ],
+      },
+    });
+    const withCheck = checkById(await doctorOn(subject.root), "agent-runtime");
+    expect(withCheck.status).toBe("ok");
+    expect(withCheck.detail).toContain("bounded real coding path");
+    expect(withCheck.detail).toContain("1 named check(s)");
+    expect(withCheck.detail).toContain("criterion-bound acceptance evidence");
+
+    // With no named checks, acceptance is assessed from the whole suite alone.
+    await writeAgent({
+      runner: "change-set",
+      verification: { command: "node", args: ["-e", "process.exit(0)"] },
+    });
+    const suiteOnly = checkById(await doctorOn(subject.root), "agent-runtime");
+    expect(suiteOnly.status).toBe("ok");
+    expect(suiteOnly.detail).toContain("whole-suite verification only");
+  });
+
   it("reconstructs a trace for a recorded task", async () => {
     const subject = await project();
     const stored = await subject.runtime.tasks.create(
@@ -316,6 +364,80 @@ describe("ai doctor: a healthy project", () => {
     expect(trace.status).toBe("ok");
     expect(trace.detail).toContain(stored.task.id);
     expect(trace.detail).toContain('status "review"');
+  });
+
+  it("replays a task's acceptance record from the log, and reads only", async () => {
+    const subject = await project();
+    const scope = {
+      projectId: subject.runtime.project.id,
+      workspaceId: subject.runtime.workspace.id,
+    };
+    const stored = await subject.runtime.tasks.create(
+      {
+        title: "Recorded task",
+        description: "Has an acceptance record",
+        acceptanceCriteria: ["Events are recorded"],
+      },
+      {
+        project: subject.runtime.project,
+        workspace: subject.runtime.workspace,
+      },
+    );
+    await subject.runtime.runTask.run(stored);
+
+    const before = await subject.runtime.store.readAll(scope);
+    const replay = checkById(await doctorOn(subject.root), "acceptance-replay");
+
+    expect(replay.status).toBe("ok");
+    expect(replay.detail).toContain(
+      "every state, source and evidence identity matches the log",
+    );
+    // Read-only: the record was read, never written, and nothing was appended for it.
+    expect(await subject.runtime.store.readAll(scope)).toHaveLength(
+      before.length,
+    );
+  });
+
+  it("fails when a task record disagrees with the acceptance event history", async () => {
+    const subject = await project();
+    const stored = await subject.runtime.tasks.create(
+      {
+        title: "Recorded task",
+        description: "Has an acceptance record",
+        acceptanceCriteria: ["A criterion only a person can judge"],
+      },
+      {
+        project: subject.runtime.project,
+        workspace: subject.runtime.workspace,
+      },
+    );
+
+    // Healthy first: nothing in the log establishes the criterion, so the record's
+    // `pending` is exactly right.
+    expect(
+      checkById(await doctorOn(subject.root), "acceptance-replay").status,
+    ).toBe("ok");
+
+    // Now mark it met by hand: a record with no event behind it.
+    const file = join(
+      tasksDirectory(subject.root),
+      subject.runtime.workspace.id,
+      `${stored.task.id}.json`,
+    );
+    const record = JSON.parse(await readFile(file, "utf8")) as {
+      task: { acceptanceCriteria: { status: string }[] };
+    };
+    record.task.acceptanceCriteria[0]!.status = "met";
+    await writeFile(file, `${JSON.stringify(record, null, 2)}\n`, "utf8");
+
+    const report = await doctorOn(subject.root);
+    const broken = checkById(report, "acceptance-replay");
+    expect(broken.status).toBe("fail");
+    expect(broken.detail).toContain(`${stored.task.id}`);
+    expect(broken.detail).toContain(
+      'criterion "AC-1": the record says "met", the log\'s history says "pending"',
+    );
+    expect(report.exitCode).toBe(1);
   });
 
   it("flags an inconsistent log rather than printing a green tick", async () => {
