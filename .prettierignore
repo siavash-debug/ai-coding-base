@@ -4,3 +4,15 @@ node_modules/
 pnpm-lock.yaml
 AGENTS.md
 *.sh
+
+# Machine-written. The runtime emits this file with `JSON.stringify(config, null, 2)`
+# (see `writeProjectConfig`), which cannot match Prettier's print width — so formatting
+# it here would be undone by the next `ai init` or configuration write. The file's shape
+# is the writer's contract, not Prettier's.
+.ai/project.json
+
+# Vendored. Copies of upstream skill repositories whose exact revisions are pinned by
+# `skills-lock.json`; reformatting them would desynchronise them from the source they are
+# verified against. Ignored at the directory level so `skills add` cannot break the
+# formatting gate.
+.agents/skills/

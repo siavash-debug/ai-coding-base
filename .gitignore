@@ -15,7 +15,33 @@ pnpm-debug.log*
 # env / secrets (never commit)
 .env
 .env.*
+# `.env.local` holds a developer's own credentials: ignored explicitly as well as by
+# the `.env.*` rule above, so it cannot be staged even if that rule is ever narrowed.
+.env.local
 !.env.example
+
+# local AI runtime state (event logs, task records) — never committed
+.ai/runtime/
+
+# local agent tooling state — tool metadata is not project source and must never
+# be committed (see AGENTS.md section 8.1 / ADR-044). `.cline/` is deliberately NOT
+# here: `.cline/rules/workspace.md` is a committed adapter that points at AGENTS.md.
+.freebuff/
+.kilo/
+
+# Vendored skill payloads installed by `skills add` — never committed. The set and exact
+# revision of every installed skill is recorded in `skills-lock.json`, which IS committed;
+# the payload itself is reproducible from that lock with `npx -y skills@latest add`.
+# Re-installing beats tracking 158 upstream files we do not own and would eventually drift.
+# `.agents/skills/typesafe-ai/` is deliberately still tracked: it is the pre-existing
+# hand-kept copy, and the ignore below names only the later install.
+.agents/skills/hindsight-docs/
+
+# Agent-adapter symlinks created by `skills add` — never committed. This checkout runs with
+# `core.symlinks=false`, so git would store the link as a text file holding the absolute
+# path of the machine that created it: broken for every other clone. Unlike `.cline/` there
+# is no committed adapter in here to point at AGENTS.md.
+.claude/
 
 # editor / OS
 .vscode/*
@@ -24,4 +50,3 @@ pnpm-debug.log*
 .DS_Store
 Thumbs.db
 *.log
-

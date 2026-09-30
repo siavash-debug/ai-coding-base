@@ -17,7 +17,10 @@
     "typecheck": "tsc --noEmit -p tsconfig.check.json",
     "test": "vitest run",
     "build": "tsc -p tsconfig.json",
-    "verify": "bash scripts/verify.sh"
+    "docs:reconciliations": "node scripts/reconciliation-notes.ts",
+    "verify": "bash scripts/verify.sh",
+    "git:identity": "bash scripts/check-git-identity.sh",
+    "ai": "node ./dist/cli/run.js"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -27,5 +30,8 @@
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.70.0",
     "vitest": "^5.0.0"
+  },
+  "dependencies": {
+    "@typesafe-ai/sdk": "^0.6.0"
   }
 }

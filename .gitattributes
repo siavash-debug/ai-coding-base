@@ -1,0 +1,15 @@
+# Line endings are LF, everywhere, for everyone.
+#
+# This repository's `.editorconfig` already declares `end_of_line = lf`, and Prettier's
+# default is `lf` — but neither of those constrains what a *checkout* writes. On Windows
+# with `core.autocrlf = true`, git materialises CRLF in the working tree while storing
+# LF in the repository, so `pnpm format:check` (and therefore `pnpm verify` and CI)
+# reported every one of those files. Declaring `eol=lf` here is what makes the checkout
+# agree with the repository on every platform, rather than only on Linux.
+#
+# `text=auto` keeps git's own per-file text/binary detection, so nothing binary is ever
+# rewritten or diffed as text.
+#
+# This changes nothing that is committed: every blob in the repository is already LF, so
+# normalising the working tree back to LF is a no-op against the index.
+* text=auto eol=lf
